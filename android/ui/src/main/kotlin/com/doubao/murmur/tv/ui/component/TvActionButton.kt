@@ -1,0 +1,93 @@
+package com.doubao.murmur.tv.ui.component
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.tv.material3.Icon
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Text
+import com.doubao.murmur.tv.ui.theme.MurmurColors
+import com.doubao.murmur.tv.ui.theme.TvDimens
+
+/**
+ * Icon + label action button, sized for a D-pad.
+ *
+ * Design notes:
+ * - Minimum height is [TvDimens.touchTargetMin] (64 dp), not the 48 dp phone minimum: the viewer
+ *   aims with a 4-way rocker from 3 m away, so a small target is a usability bug, not a nit.
+ * - [selected] does not change the focus treatment (that is owned by
+ *   [TvFocusableSurface]); it only tints the inner pill, so "which commit mode is active" stays
+ *   readable while the focus ring moves elsewhere.
+ * - The icon is decorative (`contentDescription = null`): the label is merged into the parent
+ *   semantics node, so TalkBack reads "提交" once instead of "提交 提交".
+ */
+@Composable
+fun TvActionButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    enabled: Boolean = true,
+    selected: Boolean = false,
+    contentDescription: String? = null,
+    containerColor: Color = MurmurColors.Surface,
+) {
+    TvFocusableSurface(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = TvDimens.touchTargetMin),
+        enabled = enabled,
+        shape = RoundedCornerShape(TvDimens.cornerSmall),
+        contentDescription = contentDescription,
+        containerColor = containerColor,
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(4.dp)
+                .clip(RoundedCornerShape(TvDimens.cornerSmall))
+                .background(
+                    if (selected) MurmurColors.Accent.copy(alpha = 0.28f) else Color.Transparent,
+                )
+                .padding(horizontal = 14.dp, vertical = 4.dp)
+                .widthIn(min = 88.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val tint = when {
+                !enabled -> MurmurColors.OnSurfaceMuted.copy(alpha = 0.5f)
+                selected -> MurmurColors.Accent
+                else -> MurmurColors.OnSurface
+            }
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(26.dp),
+                    tint = tint,
+                )
+                Spacer(Modifier.width(10.dp))
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelLarge,
+                color = tint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
