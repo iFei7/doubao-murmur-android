@@ -14,3 +14,4 @@ out/
 *.jks
 *.keystore
 keystore.properties
+.kotlin/
