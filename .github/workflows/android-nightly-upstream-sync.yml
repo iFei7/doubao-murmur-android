@@ -157,13 +157,13 @@ jobs:
       # :app 的 android {} 在配置阶段就需要 SDK，缺了会直接报 "SDK location not found"。
       - name: 安装 Android SDK 组件
         if: steps.merge.outputs.status == 'merged'
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-35
-            build-tools;35.0.0
-            platform-tools
-          accept-android-sdk-licenses: true
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /tmp/sdkm-licenses.log 2>&1 || true
+          if ! "$SDKM" "platforms;android-35" "build-tools;35.0.0" "platform-tools" > /tmp/sdkm.log 2>&1; then
+            tail -n 8 /tmp/sdkm.log | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          fi
 
       - name: 安装 Gradle 8.9
         if: steps.merge.outputs.status == 'merged'
