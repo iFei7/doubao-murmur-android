@@ -258,17 +258,26 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          # --ks-pass=env:XXX / --key-pass=env:XXX 让 bundletool 自己读环境变量，
-          # 避免密码出现在命令行里被 ps / 日志捕获。
-          java -jar "${BUNDLETOOL_JAR}" build-apks \
+          # bundletool 只支持 --ks-pass=pass:VAL 与 file:PATH，不支持 env:VAR。
+          # 这里把密码写入 0600 权限的临时文件走 file:，避免密码出现在命令行里被 ps / 日志捕获。
+          KS_PASS_FILE="${RUNNER_TEMP}/ks.pass"
+          KEY_PASS_FILE="${RUNNER_TEMP}/key.pass"
+          printf '%s' "$ANDROID_KEYSTORE_PASSWORD" > "$KS_PASS_FILE"
+          printf '%s' "$ANDROID_KEY_PASSWORD" > "$KEY_PASS_FILE"
+          chmod 600 "$KS_PASS_FILE" "$KEY_PASS_FILE"
+          if ! java -jar "${BUNDLETOOL_JAR}" build-apks \
             --bundle=app/build/outputs/bundle/release/app-release.aab \
             --output="${RUNNER_TEMP}/universal.apks" \
             --mode=universal \
             --ks="${ANDROID_KEYSTORE_PATH}" \
             --ks-key-alias="${ANDROID_KEY_ALIAS}" \
-            --ks-pass=env:ANDROID_KEYSTORE_PASSWORD \
-            --key-pass=env:ANDROID_KEY_PASSWORD \
-            --overwrite
+            --ks-pass="file:${KS_PASS_FILE}" \
+            --key-pass="file:${KEY_PASS_FILE}" \
+            --overwrite > /tmp/bundletool.log 2>&1; then
+            tail -n 8 /tmp/bundletool.log | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          fi
+          rm -f "$KS_PASS_FILE" "$KEY_PASS_FILE"
 
           mkdir -p "${RUNNER_TEMP}/universal"
           unzip -o -q "${RUNNER_TEMP}/universal.apks" universal.apk -d "${RUNNER_TEMP}/universal"
