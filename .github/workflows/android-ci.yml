@@ -1,0 +1,240 @@
+name: Android CI
+
+# ---------------------------------------------------------------------------
+# Android TV 版日常 CI：静态检查 / 单元测试 / Debug 构建，三个作业并行。
+#
+# 为什么不用 ./gradlew：
+#   仓库里没有（也无法手写）gradle-wrapper.jar。CI 通过
+#   gradle/actions/setup-gradle 固定安装 Gradle 8.9，直接用 `gradle` 命令。
+#   需要本地 wrapper 的开发者先跑 scripts/android/bootstrap-wrapper.sh 生成。
+#
+# 为什么 paths 要过滤：
+#   上游桌面三端（macOS / Windows / Linux）的改动与 Android 无关，
+#   不加过滤会让每个桌面端 PR 都白跑一遍 Android 构建。
+# ---------------------------------------------------------------------------
+
+on:
+  pull_request:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-*.yml'
+      - 'scripts/android/**'
+  push:
+    branches:
+      - 'feat/**'
+      - develop
+      - master
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-*.yml'
+      - 'scripts/android/**'
+  workflow_dispatch:
+
+# 同一 ref 上新的推送会取消还在跑的旧任务，省 runner 时间
+concurrency:
+  group: android-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GRADLE_OPTS: '-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false -Dorg.gradle.parallel=true'
+
+# 所有 gradle 命令都在 android/ 目录下执行；需要仓库根目录的步骤会单独覆盖 working-directory
+defaults:
+  run:
+    working-directory: android
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1. 静态检查
+  # -------------------------------------------------------------------------
+  static-analysis:
+    name: 静态检查（detekt + lint）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ubuntu-latest 的预装 SDK 不保证有 android-35 的 build-tools，
+      # setup-gradle 只装 Gradle、不装 Android SDK，所以必须显式装这三个组件，
+      # 否则 compileSdk=35 会报 "Failed to find target with hash string 'android-35'"。
+      - name: 安装 Android SDK 组件
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-35
+            build-tools;35.0.0
+            platform-tools
+          accept-android-sdk-licenses: true
+
+      - name: 安装 Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # detekt 分两档：
+      #   :asr  → 硬门禁（ignoreFailures=false）。协议解析一旦有 bug，线上表现是
+      #           "识别不出字"，比崩溃更难排查，所以这里必须真跑通。
+      #   :app  → 软门禁（ignoreFailures=true）。AGP/Compose 代码风格问题不应该阻断 PR，
+      #           单独一步执行，即使红也不影响 job 结果。
+      # 分成两个 step 而不是一条命令，是为了避免 :asr 失败后 Gradle 直接停下、
+      # 看不到 :app 的检查结果。
+      - name: detekt :asr（硬门禁）
+        run: gradle :asr:detekt
+
+      - name: detekt :app（软门禁，仅提示）
+        run: gradle :app:detekt
+
+      - name: Android Lint（lintDebug）
+        run: gradle :app:lintDebug
+        # AGP 的 lint 默认 abortOnError=true，无需额外参数
+
+      - name: 上传 Lint 报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lint-report
+          path: |
+            android/app/build/reports/lint-results*.html
+            android/app/build/reports/lint-results*.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  # -------------------------------------------------------------------------
+  # 2. 单元测试
+  # -------------------------------------------------------------------------
+  unit-test:
+    name: 单元测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # dorny/test-reporter 需要在 PR 上写 Check Run，所以这里单独提权；
+    # 仍然是只读内容权限，不涉及写代码。
+    permissions:
+      contents: read
+      checks: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ubuntu-latest 的预装 SDK 不保证有 android-35 的 build-tools，
+      # setup-gradle 只装 Gradle、不装 Android SDK，所以必须显式装这三个组件，
+      # 否则 compileSdk=35 会报 "Failed to find target with hash string 'android-35'"。
+      - name: 安装 Android SDK 组件
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-35
+            build-tools;35.0.0
+            platform-tools
+          accept-android-sdk-licenses: true
+
+      - name: 安装 Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # --continue 的作用：某个模块测试失败时不中断后续模块，一次 CI 跑完看到全部问题。
+      # 注意 Gradle 最终退出码仍为失败，"无论怎样都不阻塞"是不成立的：
+      # :asr:test 是必须真跑通的硬门禁（协议 URL 构建 / 失败分类 / 消息解析 / 收发）。
+      - name: 单元测试（:asr 必过，其余模块允许无测试）
+        run: gradle --continue :asr:test testDebugUnitTest
+
+      - name: 上传测试结果 XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-results
+          path: android/**/build/test-results/**/*.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 在 PR 上渲染测试报告
+        if: always() && github.event_name == 'pull_request'
+        uses: dorny/test-reporter@v1
+        with:
+          name: Android Unit Tests
+          path: 'android/**/build/test-results/**/*.xml'
+          reporter: java-junit
+          fail-on-error: false
+
+  # -------------------------------------------------------------------------
+  # 3. Debug 构建
+  # -------------------------------------------------------------------------
+  assemble-debug:
+    name: Debug 构建
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ubuntu-latest 的预装 SDK 不保证有 android-35 的 build-tools，
+      # setup-gradle 只装 Gradle、不装 Android SDK，所以必须显式装这三个组件，
+      # 否则 compileSdk=35 会报 "Failed to find target with hash string 'android-35'"。
+      - name: 安装 Android SDK 组件
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-35
+            build-tools;35.0.0
+            platform-tools
+          accept-android-sdk-licenses: true
+
+      - name: 安装 Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: 构建 Debug APK
+        run: gradle :app:assembleDebug
+
+      - name: 输出 APK 体积到 Step Summary
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/debug/*.apk)
+          if [[ ${#apks[@]} -eq 0 ]]; then
+            echo "未找到 Debug APK" && exit 1
+          fi
+          {
+            echo "### Debug APK"
+            echo ""
+            echo "| 文件 | 体积 |"
+            echo "|---|---|"
+            for f in "${apks[@]}"; do
+              size=$(wc -c < "$f" | tr -d ' ')
+              mb=$(awk -v s="$size" 'BEGIN { printf "%.2f", s/1048576 }')
+              echo "| \`$(basename "$f")\` | ${mb} MB |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14

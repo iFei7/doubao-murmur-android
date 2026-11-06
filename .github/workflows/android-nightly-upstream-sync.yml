@@ -1,0 +1,205 @@
+name: Android 上游同步
+
+# ---------------------------------------------------------------------------
+# 夜间把上游 iFei7/doubao-murmur-android 的 master 合并进 feat/android-tv-ime。
+#
+# 为什么是这个方向：
+#   本仓库的策略是「默认分支 master 保持与上游一致，只用于 fork / 同步」，
+#   所有 Android 代码都在 feat/android-tv-ime 上。所以同步动作发生在开发分支：
+#   upstream/master → feat/android-tv-ime。**master 分支本身不由本工作流改动。**
+#
+# 安全约束：
+#   - 冲突时只 `git merge --abort` 并开 issue，绝不 force push、绝不丢提交。
+#   - 合并成功后先跑 :asr 单测，失败才回滚；回滚是**唯一**允许使用
+#     `--force-with-lease` 的场景（因为要撤销一次已经推上去的合并）。
+#     force-with-lease 会在远端被别人动过时失败，比 --force 安全。
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # UTC 18:00 = 北京时间 02:00，避开白天开发高峰
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 合并 upstream/master
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    permissions:
+      contents: write   # push 合并结果 / 回滚
+      issues: write     # 冲突时开 issue
+
+    steps:
+      - name: 检出开发分支（全历史）
+        uses: actions/checkout@v4
+        with:
+          ref: feat/android-tv-ime
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: 记录合并前的 HEAD
+        id: pre
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 配置 git 身份
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 添加上游 remote 并拉取 master
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/iFei7/doubao-murmur-android.git 2>/dev/null || true
+          git remote set-url upstream https://github.com/iFei7/doubao-murmur-android.git
+          git fetch --no-tags upstream master
+          echo "上游最新提交："
+          git --no-pager log --oneline -1 upstream/master
+
+      - name: 尝试合并上游
+        id: merge
+        run: |
+          set -euo pipefail
+          if git merge --no-edit upstream/master; then
+            echo "status=merged" >> "$GITHUB_OUTPUT"
+            echo "合并成功，最近提交："
+            git --no-pager log --oneline -5
+          else
+            # 先记录冲突文件，再中止合并（abort 之后 diff 就空了）
+            git diff --name-only --diff-filter=U > "${RUNNER_TEMP}/conflicts.txt" || true
+            git merge --abort || true
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            echo "检测到冲突，已中止合并，分支保持原样（不会 force push）"
+            cat "${RUNNER_TEMP}/conflicts.txt"
+          fi
+
+      - name: 生成冲突报告 issue 正文
+        id: report
+        if: steps.merge.outputs.status == 'conflict'
+        run: |
+          set -euo pipefail
+          TODAY="$(date -u +%Y-%m-%d)"
+          echo "title=[自动同步] 上游 master 合并冲突 ${TODAY}" >> "$GITHUB_OUTPUT"
+          {
+            echo "夜间自动同步把 \`upstream/master\` 合并到 \`feat/android-tv-ime\` 时发生冲突。"
+            echo ""
+            echo "**已自动执行 \`git merge --abort\`，分支没有任何改动。**"
+            echo ""
+            echo "## 冲突文件"
+            echo ""
+            if [[ -s "${RUNNER_TEMP}/conflicts.txt" ]]; then
+              echo '```'
+              cat "${RUNNER_TEMP}/conflicts.txt"
+              echo '```'
+            else
+              echo "_未能取得冲突文件列表，请手动执行 \`git merge upstream/master\` 复现。_"
+            fi
+            echo ""
+            echo "## 处理建议"
+            echo ""
+            echo "1. 本地执行："
+            echo ""
+            echo '   ```bash'
+            echo "   git fetch upstream master"
+            echo "   git checkout feat/android-tv-ime"
+            echo "   git merge upstream/master"
+            echo '   ```'
+            echo ""
+            echo "2. Android 代码集中在 \`android/\` 子目录，与上游三端（macOS/Windows/Linux）几乎不重叠；"
+            echo "   冲突多半出现在根 README、\`.gitignore\`、\`.github/workflows/\` 这类共享文件上，"
+            echo "   原则是**保留上游内容 + 追加 Android 段落**，不要整段覆盖。"
+            echo ""
+            echo "3. 解决后推送："
+            echo ""
+            echo '   ```bash'
+            echo "   git add -A && git commit"
+            echo "   git push origin feat/android-tv-ime"
+            echo '   ```'
+            echo ""
+            echo "---"
+            echo ""
+            echo "本次运行：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > "${RUNNER_TEMP}/issue.md"
+          echo "已生成 issue 正文（$(wc -l < "${RUNNER_TEMP}/issue.md") 行）"
+
+      - name: 开 issue 通知维护者
+        if: steps.merge.outputs.status == 'conflict'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: ${{ steps.report.outputs.title }}
+          content-filepath: ${{ runner.temp }}/issue.md
+          labels: |
+            android
+            upstream-sync
+
+      - name: 推送合并结果
+        id: push
+        if: steps.merge.outputs.status == 'merged'
+        run: git push origin HEAD:feat/android-tv-ime
+
+      # --- 回归门禁：合并后必须还能编译测试 -------------------------------
+      - name: 安装 JDK 17
+        if: steps.merge.outputs.status == 'merged'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 虽然这里只跑 :asr:test（纯 kotlin-jvm），但 Gradle 默认会配置所有子工程，
+      # :app 的 android {} 在配置阶段就需要 SDK，缺了会直接报 "SDK location not found"。
+      - name: 安装 Android SDK 组件
+        if: steps.merge.outputs.status == 'merged'
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-35
+            build-tools;35.0.0
+            platform-tools
+          accept-android-sdk-licenses: true
+
+      - name: 安装 Gradle 8.9
+        if: steps.merge.outputs.status == 'merged'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: 回归门禁（:asr 单元测试）
+        id: regression
+        if: steps.merge.outputs.status == 'merged'
+        continue-on-error: true
+        working-directory: android
+        run: gradle :asr:test
+
+      - name: 回滚已推送的合并
+        if: steps.merge.outputs.status == 'merged' && steps.regression.outcome == 'failure'
+        env:
+          PRE_SHA: ${{ steps.pre.outputs.sha }}
+        run: |
+          set -euo pipefail
+          echo "回归测试失败，回滚到合并前的提交 ${PRE_SHA}"
+          git reset --hard "${PRE_SHA}"
+          # 这是仓库里唯一允许 force-with-lease 的地方：
+          # 目的是撤销刚刚自己推上去的合并提交，且 lease 会保护别人的改动。
+          git push --force-with-lease origin HEAD:feat/android-tv-ime
+          echo "::error::上游合并后 :asr 单测失败，已回滚到 ${PRE_SHA}，请人工排查"
+
+      - name: 结果摘要
+        if: always()
+        run: |
+          {
+            echo "### 上游同步结果"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 合并状态 | \`${{ steps.merge.outputs.status }}\` |"
+            echo "| 合并前 HEAD | \`${{ steps.pre.outputs.sha }}\` |"
+            echo "| 回归测试 | \`${{ steps.regression.outcome }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

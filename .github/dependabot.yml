@@ -1,0 +1,50 @@
+# Dependabot：只覆盖 Android 工程与 Actions 本身，不动桌面三端（Rust / Tauri / Swift）。
+#
+# 分组策略：minor + patch 合成一个 PR，避免每周十几条 PR 淹没 review。
+# major 版本单独出 PR，因为 AGP / Kotlin / Compose 的大版本升级几乎必然要改代码。
+version: 2
+
+updates:
+  # Gradle 依赖（libs.versions.toml + 各模块 build.gradle.kts）
+  - package-ecosystem: gradle
+    directory: /android
+    schedule:
+      interval: weekly
+      day: monday
+      time: '03:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    labels:
+      - android
+      - dependencies
+    commit-message:
+      prefix: 'chore(android/deps)'
+    groups:
+      gradle-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions 版本（.github/workflows 下的 uses: 引用）
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '03:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    labels:
+      - ci
+      - dependencies
+    commit-message:
+      prefix: 'chore(ci/deps)'
+    groups:
+      actions-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch

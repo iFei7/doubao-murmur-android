@@ -1,0 +1,170 @@
+name: Android TV Benchmark
+
+# ---------------------------------------------------------------------------
+# Macrobenchmark：衡量输入法弹出/隐藏、焦点移动、录音链路的真实帧耗时。
+#
+# 为什么需要 :app:assembleRelease：
+#   macrobenchmark 必须跑在**非 debuggable** 的目标应用上，否则测出来的
+#   是 debug 变体（无 R8、有调试开销），数字没有意义。
+#
+# Firebase Test Lab 的诚实说明：
+#   FTL 目前提供的 Android TV 机型很少（Chromecast with Google TV 是少数可选项），
+#   国内 TV 盒子（小米/当贝/投影）基本不在覆盖范围内。想覆盖这些设备只能：
+#     - 自建设备农场（多台盒子 + adb 调度），或
+#     - 本地 adb 连真机跑 `gradle :benchmark:connectedBenchmarkAndroidTest`。
+#   因此本工作流在**未配置 FTL 凭证时直接跳过真机基准**，只保证产物能编译出来，
+#   并在 step summary 里写明跳过原因——不 fail，避免每周一次的红叉噪音。
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周一 UTC 03:00（北京时间 11:00）
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  GRADLE_OPTS: '-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false'
+  # 默认测 Chromecast with Google TV（sabrina / API 30）；换成自己的机型改仓库变量
+  TV_DEVICE_MODEL: ${{ vars.TV_DEVICE_MODEL || 'sabrina' }}
+  TV_DEVICE_VERSION: ${{ vars.TV_DEVICE_VERSION || '30' }}
+
+defaults:
+  run:
+    working-directory: android
+
+jobs:
+  benchmark:
+    name: 构建并运行 macrobenchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Android SDK 组件
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-35
+            build-tools;35.0.0
+            platform-tools
+          accept-android-sdk-licenses: true
+
+      - name: 安装 Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: 探测签名与 FTL 凭证
+        env:
+          HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+          HAS_FTL_PROJECT: ${{ secrets.FTL_PROJECT_ID != '' }}
+          HAS_GCP_SA: ${{ secrets.GCP_SA_JSON != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "${HAS_KEYSTORE}" == "true" ]]; then
+            echo "KEYSTORE_ENABLED=true" >> "$GITHUB_ENV"
+            # 有密钥就走正常签名，不需要逃生阀
+            echo "SIGNING_ARGS=" >> "$GITHUB_ENV"
+          else
+            echo "KEYSTORE_ENABLED=false" >> "$GITHUB_ENV"
+            # 无密钥（fork PR / 仅编译校验）：显式降级为 warn，否则 checkReleaseSigning 会直接 throw
+            echo "SIGNING_ARGS=-PallowUnsignedRelease=true" >> "$GITHUB_ENV"
+          fi
+          if [[ "${HAS_FTL_PROJECT}" == "true" && "${HAS_GCP_SA}" == "true" ]]; then
+            echo "FTL_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "FTL_ENABLED=false" >> "$GITHUB_ENV"
+          fi
+          echo "签名可用：${HAS_KEYSTORE}；FTL 可用：${HAS_FTL_PROJECT}/${HAS_GCP_SA}"
+
+      - name: 解码签名 keystore（可选）
+        if: env.KEYSTORE_ENABLED == 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: bash scripts/android/decode-keystore.sh
+
+      # macrobenchmark 必须跑在非 debuggable 的 release 变体上，所以这里要 build
+      # :app:assembleRelease。但 :app 的 checkReleaseSigning 在缺少四个
+      # ANDROID_KEYSTORE_*/ANDROID_KEY_* 时是**硬失败**（throw GradleException），
+      # 而 fork PR 上不可能有这些 secret。
+      #
+      # 所以：只在「没有 keystore secret」的分支上传 -PallowUnsignedRelease=true，
+      #   此时产物**未签名、不可安装**，仅用于证明 release 变体能编译通过；
+      #   有 secret 时不传该参数，保持签名门禁的硬失败语义（也避免悄悄产出未签名的包）。
+      # 注意：android-release.yml 任何情况下都不加这个参数——正式包必须签名。
+      - name: 构建目标 APK 与 benchmark APK
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          GIT_SHA: ${{ github.sha }}
+        run: gradle :app:assembleRelease :benchmark:assembleRelease ${SIGNING_ARGS:-}
+
+      - name: 上传 benchmark 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-tv-benchmark-apks
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+            android/benchmark/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+          retention-days: 14
+
+      # --- 真机基准（可选）------------------------------------------------
+      - name: 认证 Google Cloud
+        if: env.FTL_ENABLED == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_JSON }}
+
+      - name: 安装 gcloud
+        if: env.FTL_ENABLED == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: 在 Firebase Test Lab 运行 macrobenchmark
+        if: env.FTL_ENABLED == 'true'
+        env:
+          FTL_PROJECT_ID: ${{ secrets.FTL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          gcloud firebase test android run \
+            --type macrobenchmark \
+            --app app/build/outputs/apk/release/app-release.apk \
+            --test benchmark/build/outputs/apk/release/benchmark-release.apk \
+            --device "model=${TV_DEVICE_MODEL},version=${TV_DEVICE_VERSION},locale=zh_CN,orientation=landscape" \
+            --project "${FTL_PROJECT_ID}" \
+            --timeout 30m
+
+      - name: 未配置 FTL 时写摘要
+        if: env.FTL_ENABLED != 'true'
+        run: |
+          {
+            echo "### 真机基准已跳过"
+            echo ""
+            echo "未配置 Firebase Test Lab 凭证（\`FTL_PROJECT_ID\` + \`GCP_SA_JSON\`），"
+            echo "本次只验证了 benchmark 产物可以编译。"
+            echo ""
+            echo "补充说明：FTL 的 Android TV 机型覆盖非常有限（大致只有 Chromecast with Google TV），"
+            echo "国内 TV 盒子/投影需要自建设备农场，或在本地用 adb 跑："
+            echo ""
+            echo '```bash'
+            echo "gradle :benchmark:connectedBenchmarkAndroidTest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 清理临时 keystore
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/release.keystore" || true

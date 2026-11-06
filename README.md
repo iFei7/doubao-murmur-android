@@ -166,6 +166,17 @@ git push origin v1.5.0
 | `windows-release.yml` | Windows 安装包 + 免安装 exe（x64 / ARM64）|
 | `flatpak-release.yml` | Linux `.flatpak` |
 
+## Android TV 版（开发分支）
+
+Android TV 语音输入法在 `feat/android-tv-ime` 分支的 `android/` 下开发，支持遥控器唤起、语音识别、
+文本直接提交到输入框，并附带 sideload / Play / 国内 TV 市场三条分发链路。
+
+`master` 分支保持与上游一致，只用于 fork 与同步上游，不承载 Android 代码。
+
+- 工程入口：[android/README.md](android/README.md)
+- 设计与适配细节：[android/docs/](android/docs/)
+- Android 发版 tag 前缀：`android-tv-v*`（**不要用 `v*`**，那会触发桌面三端的构建）
+
 ## License
 
 [MIT](LICENSE)

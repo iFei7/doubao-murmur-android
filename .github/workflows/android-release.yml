@@ -1,0 +1,404 @@
+name: Android TV Release
+
+# ---------------------------------------------------------------------------
+# Android TV 正式发版：构建 → 验签 → universal APK → OTA manifest → Release → Play
+#
+# ⚠ Tag 前缀必须是 `android-tv-v*`，不能是 `v*`：
+#   上游的 release.yml（macOS）、windows-release.yml、flatpak-release.yml
+#   全部以 `v*` 触发。用 `v*` 打 Android 版本会连带触发 macOS / Windows / Flatpak
+#   三端构建，产生一堆无意义的 Release 资产和 30 分钟以上的排队。
+#
+# 版本号来源：
+#   - tag 推送：从 GITHUB_REF_NAME 去掉 `android-tv-v` 前缀
+#   - 手动触发：workflow_dispatch 的 version 输入
+#   两者都交给 scripts/android/compute-version.sh 统一派生 versionCode，
+#   禁止在工作流里硬编码任何版本数字。
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    tags:
+      - 'android-tv-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（不含前缀），例如 0.1.0 或 0.2.0-beta.1'
+        required: true
+        type: string
+      track:
+        description: 'Play 轨道'
+        required: true
+        default: 'internal'
+        type: choice
+        options:
+          - internal
+          - alpha
+          - beta
+          - production
+      dry_run:
+        description: '只构建与校验，不创建 Release、不上传 Play'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GRADLE_OPTS: '-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false'
+
+defaults:
+  run:
+    working-directory: android
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # production / alpha 轨道绑定 GitHub Environment，可在这里配置"必须人工审批"。
+    # internal / beta 会让 GitHub 自动创建同名 Environment（无审批规则时直接通过）。
+    environment: play-${{ inputs.track || 'internal' }}
+
+    # 发布需要写 Release 与 tag
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出代码（全历史，changelog 与 tag 计算需要）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------------
+      # 版本
+      # ---------------------------------------------------------------------
+      - name: 计算版本号
+        working-directory: ${{ github.workspace }}
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            RAW="${INPUT_VERSION}"
+          else
+            RAW="${GITHUB_REF_NAME}"
+          fi
+          [[ -n "${RAW}" ]] || { echo "错误：未提供版本号"; exit 1; }
+          echo "原始版本标识：${RAW}"
+
+          OUT="$(bash scripts/android/compute-version.sh "${RAW}")"
+          echo "${OUT}"
+          echo "${OUT}" >> "$GITHUB_ENV"
+          echo "RAW_VERSION=${RAW}" >> "$GITHUB_ENV"
+
+      - name: 校验 versionCode 未被历史 tag 占用
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          SELF_TAG=""
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            SELF_TAG="${GITHUB_REF_NAME}"
+          fi
+
+          DUP=""
+          while IFS= read -r t; do
+            [[ -z "${t}" ]] && continue
+            [[ "${t}" == "${SELF_TAG}" ]] && continue
+            code="$(bash scripts/android/compute-version.sh "${t}" 2>/dev/null | sed -n 's/^VERSION_CODE=//p')"
+            if [[ "${code}" == "${VERSION_CODE}" ]]; then
+              DUP="${t}"
+            fi
+          done < <(git tag -l 'android-tv-v*')
+
+          if [[ -n "${DUP}" ]]; then
+            echo "错误：versionCode=${VERSION_CODE} 已被 tag ${DUP} 使用。"
+            echo "Play 会直接拒绝重复的 versionCode；请换一个版本号（例如 patch +1）。"
+            exit 1
+          fi
+          echo "versionCode=${VERSION_CODE} 未与任何历史 tag 冲突"
+
+      - name: 解析 dry_run 与 Play 凭证
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          HAS_PLAY: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
+        run: |
+          set -euo pipefail
+          DRY="false"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_DRY_RUN}" == "true" ]]; then
+            DRY="true"
+          fi
+          echo "DRY_RUN=${DRY}" >> "$GITHUB_ENV"
+
+          # `if:` 里不能直接比较 secrets，所以在这里转成普通 env 标记
+          if [[ "${HAS_PLAY}" == "true" && "${DRY}" != "true" ]]; then
+            echo "PLAY_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Play 上传：已启用"
+          else
+            echo "PLAY_ENABLED=false" >> "$GITHUB_ENV"
+            echo "Play 上传：跳过（未配置 PLAY_SERVICE_ACCOUNT_JSON 或 dry_run=true）"
+          fi
+
+      # ---------------------------------------------------------------------
+      # 签名
+      # ---------------------------------------------------------------------
+      - name: 解码签名 keystore 到临时目录
+        working-directory: ${{ github.workspace }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: bash scripts/android/decode-keystore.sh
+
+      # ---------------------------------------------------------------------
+      # 构建
+      # ---------------------------------------------------------------------
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # setup-gradle 只装 Gradle，不装 Android SDK；ubuntu-latest 也不保证带 35 的 build-tools。
+      - name: 安装 Android SDK 组件
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-35
+            build-tools;35.0.0
+            platform-tools
+          accept-android-sdk-licenses: true
+
+      # apksigner / aapt2 都在 build-tools/35.0.0 下；加进 PATH 后
+      # scripts/android/verify-artifacts.sh 与人工排查都能直接调用。
+      - name: 把 build-tools 加入 PATH
+        run: |
+          echo "${ANDROID_HOME}/build-tools/35.0.0" >> "$GITHUB_PATH"
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+
+      - name: 安装 Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: 构建 Release AAB 与 APK（stable 渠道）
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          gradle :app:bundleRelease :app:assembleRelease \
+            -PversionName="${VERSION_NAME}" \
+            -PversionCode="${VERSION_CODE}" \
+            -Pchannel=stable
+
+      # ---------------------------------------------------------------------
+      # 下载 bundletool（校验 AAB manifest + 后面生成 universal APK 都要用）
+      # ---------------------------------------------------------------------
+      - name: 下载 bundletool（固定版本 1.17.2）
+        working-directory: ${{ github.workspace }}
+        env:
+          BUNDLETOOL_VERSION: '1.17.2'
+          BUNDLETOOL_SHA256: ${{ vars.BUNDLETOOL_SHA256 }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar"
+          curl -fsSL -o "${RUNNER_TEMP}/bundletool.jar" "${URL}"
+          ACTUAL="$(sha256sum "${RUNNER_TEMP}/bundletool.jar" | cut -d' ' -f1)"
+          if [[ -n "${BUNDLETOOL_SHA256}" ]]; then
+            if [[ "${ACTUAL}" != "${BUNDLETOOL_SHA256}" ]]; then
+              echo "错误：bundletool 校验和不匹配"
+              echo "  期望：${BUNDLETOOL_SHA256}"
+              echo "  实际：${ACTUAL}"
+              exit 1
+            fi
+            echo "bundletool 校验和校验通过"
+          else
+            # 不在仓库里硬编码一个可能过期的哈希（那才是真正的坏味道），
+            # 改为要求把哈希配置成仓库 Variables；未配置时降级为"打印并告警"。
+            echo "::warning::未配置仓库变量 BUNDLETOOL_SHA256，仅打印实际校验和 ${ACTUAL}，建议钉死。"
+            {
+              echo "### bundletool"
+              echo ""
+              echo "未配置 \`BUNDLETOOL_SHA256\` 变量，本次实际 sha256：\`${ACTUAL}\`"
+              echo "建议把它写进仓库 Variables，防止上游 jar 被替换。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "BUNDLETOOL_JAR=${RUNNER_TEMP}/bundletool.jar" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------------
+      # 校验
+      # ---------------------------------------------------------------------
+      - name: 校验产物（验签 / 版本号 / TV 与 IME 声明）
+        working-directory: ${{ github.workspace }}
+        env:
+          VERSION_NAME: ${{ env.VERSION_NAME }}
+          VERSION_CODE: ${{ env.VERSION_CODE }}
+          BUNDLETOOL_JAR: ${{ runner.temp }}/bundletool.jar
+        run: |
+          set -euo pipefail
+          # verify-artifacts.sh 自己会定位 apksigner/aapt2；bundletool 需要先下载，
+          # 这里把路径传进去，若文件尚不存在脚本会自动跳过 AAB 深度校验。
+          bash scripts/android/verify-artifacts.sh
+
+      # ---------------------------------------------------------------------
+      # universal APK + 校验和 + OTA manifest
+      # ---------------------------------------------------------------------
+      - name: 由 AAB 生成 universal APK
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # --ks-pass=env:XXX / --key-pass=env:XXX 让 bundletool 自己读环境变量，
+          # 避免密码出现在命令行里被 ps / 日志捕获。
+          java -jar "${BUNDLETOOL_JAR}" build-apks \
+            --bundle=app/build/outputs/bundle/release/app-release.aab \
+            --output="${RUNNER_TEMP}/universal.apks" \
+            --mode=universal \
+            --ks="${ANDROID_KEYSTORE_PATH}" \
+            --ks-key-alias="${ANDROID_KEY_ALIAS}" \
+            --ks-pass=env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass=env:ANDROID_KEY_PASSWORD \
+            --overwrite
+
+          mkdir -p "${RUNNER_TEMP}/universal"
+          unzip -o -q "${RUNNER_TEMP}/universal.apks" universal.apk -d "${RUNNER_TEMP}/universal"
+          ls -l "${RUNNER_TEMP}/universal/universal.apk"
+
+      - name: 整理发布产物目录
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "android/app/build/outputs/bundle/release/app-release.aab" \
+             "dist/doubao-murmur-tv-${VERSION_NAME}.aab"
+          cp "android/app/build/outputs/apk/release/app-release.apk" \
+             "dist/doubao-murmur-tv-${VERSION_NAME}.apk"
+          cp "${RUNNER_TEMP}/universal/universal.apk" \
+             "dist/doubao-murmur-tv-${VERSION_NAME}-universal.apk"
+          ls -l dist
+
+      - name: 生成 SHA256SUMS.txt
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          # 只对发布资产做校验和，文件名保持 basename，方便用户直接 sha256sum -c
+          ( cd dist && sha256sum ./*.aab ./*.apk | sed 's|\./||' > SHA256SUMS.txt )
+          cat dist/SHA256SUMS.txt
+          {
+            echo "### 发布产物"
+            echo ""
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 生成 TV 侧 OTA manifest
+        working-directory: ${{ github.workspace }}
+        env:
+          BASE_URL: https://github.com/${{ github.repository }}/releases/download/android-tv-v${{ env.VERSION_NAME }}/
+        run: |
+          set -euo pipefail
+          bash scripts/android/make-ota-manifest.sh \
+            --version-code "${VERSION_CODE}" \
+            --version-name "${VERSION_NAME}" \
+            --apk "dist/doubao-murmur-tv-${VERSION_NAME}-universal.apk" \
+            --base-url "${BASE_URL}" \
+            --notes "Android TV ${VERSION_NAME}" \
+            --out dist/tv-ota/manifest.json
+          cat dist/tv-ota/manifest.json
+
+      # ---------------------------------------------------------------------
+      # changelog（同时喂给 Release 正文与 Play 的"本次更新"）
+      # ---------------------------------------------------------------------
+      - name: 生成 changelog 与 Play 更新说明
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          PREV="$(git tag --list 'android-tv-v*' --sort=-v:refname \
+                  | grep -vx "android-tv-v${VERSION_NAME}" | head -n1 || true)"
+          if [[ -z "${PREV}" ]]; then
+            PREV="$(git rev-list --max-parents=0 HEAD | tail -n1)"
+          fi
+          echo "changelog 起点：${PREV}"
+
+          VERSION_NAME="${VERSION_NAME}" bash scripts/android/gen-changelog.sh "${PREV}" HEAD > dist/changelog.md
+          echo "--- changelog ---"
+          cat dist/changelog.md
+
+          # Play 的 "what's new" 有长度限制（约 500 字符），这里截断到 400 字
+          NOTES="$(cat dist/changelog.md)"
+          if [[ -n "${RELEASE_NOTES:-}" ]]; then
+            NOTES="${RELEASE_NOTES}"
+          fi
+          NOTES="${NOTES:0:400}"
+
+          for loc in zh-CN en-US; do
+            mkdir -p "android/fastlane-metadata/${loc}/changelogs"
+            printf '%s\n' "${NOTES}" > "android/fastlane-metadata/${loc}/changelogs/${VERSION_CODE}.txt"
+          done
+          echo "已写入 fastlane-metadata/<locale>/changelogs/${VERSION_CODE}.txt"
+          echo "CHANGELOG_FILE=${GITHUB_WORKSPACE}/dist/changelog.md" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------------
+      # 发布
+      # ---------------------------------------------------------------------
+      - name: 创建 GitHub Release
+        if: env.DRY_RUN != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-tv-v${{ env.VERSION_NAME }}
+          name: Android TV ${{ env.VERSION_NAME }}
+          body_path: ${{ env.CHANGELOG_FILE }}
+          # 版本号带 `-` 视为预发布（0.2.0-beta.1）
+          prerelease: ${{ contains(env.VERSION_NAME, '-') }}
+          files: |
+            dist/doubao-murmur-tv-*.aab
+            dist/doubao-murmur-tv-*.apk
+            dist/SHA256SUMS.txt
+            dist/tv-ota/manifest.json
+
+      - name: 上传 Google Play（draft，人工放量）
+        if: env.PLAY_ENABLED == 'true'
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.doubao.murmur.tv
+          releaseFiles: dist/doubao-murmur-tv-${{ env.VERSION_NAME }}.aab
+          track: ${{ inputs.track || 'internal' }}
+          # 一律先落地为 draft：生产轨道必须由人在 Play Console 手动开始放量，
+          # 避免自动化把有问题的包直接推给全部用户。
+          releaseStatus: draft
+          # Play 会读取 <locale>/changelogs/<versionCode>.txt；目录由上一步生成。
+          # 若目录缺失（例如非正式构建），请删掉 whatsNewDirectory 参数，否则会报错。
+          whatsNewDirectory: android/fastlane-metadata
+
+      - name: 打印发布摘要
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          {
+            echo "### 发布摘要"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 版本 | \`${VERSION_NAME}\` |"
+            echo "| versionCode | \`${VERSION_CODE}\` |"
+            echo "| 轨道 | \`${{ inputs.track || 'internal' }}\` |"
+            echo "| dry_run | \`${DRY_RUN}\` |"
+            echo "| Play 上传 | \`${PLAY_ENABLED}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 无论成功失败都必须抹掉临时 keystore
+      - name: 清理临时 keystore
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/release.keystore" "${RUNNER_TEMP}/universal.apks" || true

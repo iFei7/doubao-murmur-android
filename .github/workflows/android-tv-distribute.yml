@@ -1,0 +1,376 @@
+name: Android TV 分发
+
+# ---------------------------------------------------------------------------
+# 把「已经发布过的某个版本」推到不同渠道。发版请走 android-release.yml，
+# 这个工作流只做分发，不重新构建（同一 versionCode 复用同一份产物）。
+#
+# 渠道真相（务必读一遍再改代码）：
+#   play-internal / play-alpha / play-production
+#       通过 Play Developer API 把同一个 AAB 落到不同 track。
+#       Play 的规则是「track 是 versionCode 的挂载点」：同一个 versionCode
+#       上传到更高 track 就等于晋级/放量，不需要重新出包。
+#       ⚠ 正式商业化前建议改用 Play Console 的 staged rollout（5% → 20% → 50% → 100%），
+#         本工作流只做「整轨切换」，粒度比 staged rollout 粗。
+#   sideload
+#       面向无法访问 Play 的 TV 盒子 / 投影 / 国内 ROM：产出 universal APK +
+#       校验和 + OTA manifest + adb 批量安装脚本，挂到 Release 上。
+#   第三方（国内电视应用市场）
+#       当贝 / 沙发管家 / 小米 / 华为 / 应用宝 等**多数不提供公开的上传 API**，
+#       也不接受自动化提交。本工作流产出的是「人工上传用的渠道提交包」（zip），
+#       由运营同学去各家后台上架。**这不是自动上架**。
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要分发的版本号（不含 android-tv-v 前缀），必须已存在对应 Release'
+        required: true
+        type: string
+      channel:
+        description: '分发渠道'
+        required: true
+        type: choice
+        default: 'play-internal'
+        options:
+          - play-internal
+          - play-alpha
+          - play-production
+          - sideload
+          - third-party
+      release_notes:
+        description: '本次更新说明（可选，用于 sideload 的 OTA manifest 与渠道包文案）'
+        required: false
+        default: ''
+        type: string
+      confirm_production:
+        description: '确认要放量到生产轨道（play-production 必填 true）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 前置：计算版本、校验 Release 是否存在、校验生产渠道的确认开关
+  # -------------------------------------------------------------------------
+  prepare:
+    name: 准备与校验
+    runs-on: ubuntu-latest
+    outputs:
+      version_name: ${{ steps.ver.outputs.version_name }}
+      version_code: ${{ steps.ver.outputs.version_code }}
+      tag: ${{ steps.ver.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 计算版本
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          OUT="$(bash scripts/android/compute-version.sh "${INPUT_VERSION}")"
+          echo "${OUT}"
+          VN="$(printf '%s\n' "${OUT}" | sed -n 's/^VERSION_NAME=//p')"
+          VC="$(printf '%s\n' "${OUT}" | sed -n 's/^VERSION_CODE=//p')"
+          echo "version_name=${VN}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VC}" >> "$GITHUB_OUTPUT"
+          echo "tag=android-tv-v${VN}" >> "$GITHUB_OUTPUT"
+
+      - name: 校验 Release 已存在
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "错误：找不到 Release ${TAG}。请先用 android-release.yml 发布该版本。"
+            exit 1
+          fi
+          gh release view "${TAG}" --json tagName,assets --jq '.tagName, (.assets[].name)'
+
+      # 生产放量必须有显式确认；否则直接 fail（比静默 skip 更安全，
+      # 避免"以为已经放量了、其实什么都没做"）。
+      - name: 生产渠道确认检查
+        if: inputs.channel == 'play-production'
+        env:
+          CONFIRM: ${{ inputs.confirm_production }}
+        run: |
+          set -euo pipefail
+          if [[ "${CONFIRM}" != "true" ]]; then
+            echo "错误：channel=play-production 必须同时勾选 confirm_production=true。"
+            exit 1
+          fi
+          echo "已确认放量到生产轨道，后续作业仍需 GitHub Environment 人工审批。"
+
+  # -------------------------------------------------------------------------
+  # Play：内部测试 / Alpha 晋级（不涉及生产）
+  # -------------------------------------------------------------------------
+  play-promote:
+    name: Play 晋级（${{ inputs.channel }}）
+    needs: prepare
+    if: startsWith(inputs.channel, 'play-') && inputs.channel != 'play-production'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # play-internal / play-alpha 各自绑定同名 Environment，可按需配置审批人
+    environment: ${{ inputs.channel }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载该版本已发布的 AAB
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${TAG}" --pattern '*.aab' --dir dist --clobber
+          ls -l dist
+
+      - name: 上传到 Play 轨道（draft）
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.doubao.murmur.tv
+          releaseFiles: dist/*.aab
+          # play-internal -> internal，play-alpha -> alpha
+          track: ${{ inputs.channel == 'play-alpha' && 'alpha' || 'internal' }}
+          # 非生产轨道一律 draft：还留在 Play Console 里等人点发布
+          releaseStatus: draft
+
+  # -------------------------------------------------------------------------
+  # Play：生产放量（需要 confirm_production + Environment 人工审批）
+  # -------------------------------------------------------------------------
+  play-production:
+    name: Play 生产放量
+    needs: prepare
+    if: inputs.channel == 'play-production' && inputs.confirm_production == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # 该 Environment 应配置 Required reviewers，人工点过才继续
+    environment: play-production
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载该版本已发布的 AAB
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${TAG}" --pattern '*.aab' --dir dist --clobber
+          ls -l dist
+
+      - name: 上线到 production 轨道
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.doubao.murmur.tv
+          releaseFiles: dist/*.aab
+          track: production
+          # 生产轨道用 completed：Environment 审批就是这里的人工闸门。
+          # 想要分阶段放量请在 Play Console 手动把 staged rollout 拉到 5% 起。
+          releaseStatus: completed
+
+  # -------------------------------------------------------------------------
+  # sideload：TV 盒子 / 投影 / 无 Play 的国内 ROM
+  # -------------------------------------------------------------------------
+  sideload:
+    name: sideload 安装包
+    needs: prepare
+    if: inputs.channel == 'sideload'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载 universal APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${TAG}" --pattern '*-universal.apk' --dir dist --clobber
+          ls -l dist
+
+      - name: 渲染安装说明
+        env:
+          VERSION: ${{ needs.prepare.outputs.version_name }}
+          VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          APK_NAME="$(basename "$(ls dist/*-universal.apk | head -n1)")"
+
+          # 用模板渲染而不是在 YAML 里写 heredoc：缩进过的 heredoc 终止符
+          # 在 bash 里不合法，会让整个步骤静默吞掉后面的内容。
+          sed -e "s|__VERSION_CODE__|${VERSION_CODE}|g" \
+              -e "s|__VERSION__|${VERSION}|g" \
+              -e "s|__APK_NAME__|${APK_NAME}|g" \
+              scripts/android/templates/tv-install.md.tpl > dist/INSTALL.md
+
+          cp scripts/android/adb-install-tv.sh dist/adb-install-tv.sh
+          chmod +x dist/adb-install-tv.sh
+          head -n 20 dist/INSTALL.md
+
+      - name: 重新生成 OTA manifest
+        env:
+          VERSION: ${{ needs.prepare.outputs.version_name }}
+          VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          APK="$(ls dist/*-universal.apk | head -n1)"
+          # 注意：manifest 里的 apkUrl 指向 Release 的下载地址，
+          # 所以 basename 必须与 Release 资产名一致。
+          bash scripts/android/make-ota-manifest.sh \
+            --version-code "${VERSION_CODE}" \
+            --version-name "${VERSION}" \
+            --apk "${APK}" \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/${TAG}/" \
+            --notes "${RELEASE_NOTES:-sideload ${VERSION}}" \
+            --out dist/tv-ota/manifest.json
+          cat dist/tv-ota/manifest.json
+
+      - name: 生成 SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          ( cd dist && sha256sum ./*.apk ./adb-install-tv.sh | sed 's|\./||' > SHA256SUMS.txt )
+          cat dist/SHA256SUMS.txt
+
+      - name: 上传为 Release 资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG}" \
+            dist/SHA256SUMS.txt \
+            dist/INSTALL.md \
+            dist/adb-install-tv.sh \
+            dist/tv-ota/manifest.json \
+            --clobber
+
+  # -------------------------------------------------------------------------
+  # 第三方：国内 TV 应用市场「人工上传用」的渠道提交包
+  # -------------------------------------------------------------------------
+  third-party:
+    name: 第三方渠道提交包
+    needs: prepare
+    if: inputs.channel == 'third-party'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载 universal APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/src
+          gh release download "${TAG}" --pattern '*-universal.apk' --dir dist/src --clobber
+          ls -l dist/src
+
+      - name: 生成各市场提交包
+        env:
+          VERSION: ${{ needs.prepare.outputs.version_name }}
+          VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          set -euo pipefail
+          APK="$(ls dist/src/*-universal.apk | head -n1)"
+
+          # 国内主流 TV 市场；键是目录名，值是展示名
+          MARKETS="dangbei:当贝市场 sofa:沙发管家 xiaomi:小米电视应用商店 huawei:华为应用市场 yingyongbao:应用宝"
+
+          # 更新说明里可能有换行/&/|，先压成单行并转义，避免破坏 sed 表达式
+          NOTES="$(printf '%s' "${RELEASE_NOTES:-修复若干已知问题，优化识别速度。}" | tr '\n' ' ')"
+          NOTES_ESC="$(printf '%s' "${NOTES}" | sed -e 's/[\\&|]/\\&/g')"
+
+          for entry in ${MARKETS}; do
+            market="${entry%%:*}"
+            label="${entry#*:}"
+            outdir="dist/third-party/${market}"
+            mkdir -p "${outdir}/screenshots"
+
+            # 渠道包按市场重命名，方便运营上传时不会拿错
+            cp "${APK}" "${outdir}/doubao-murmurtv-${VERSION}-${market}.apk"
+
+            # 用模板渲染，避免 YAML 里写 heredoc（缩进的终止符在 bash 里非法）
+            sed -e "s|__MARKET_LABEL__|${label}|g" \
+                -e "s|__MARKET__|${market}|g" \
+                -e "s|__VERSION_CODE__|${VERSION_CODE}|g" \
+                -e "s|__VERSION__|${VERSION}|g" \
+                -e "s|__NOTES__|${NOTES_ESC}|g" \
+                scripts/android/templates/tv-listing.md.tpl > "${outdir}/listing.md"
+
+            cp scripts/android/templates/tv-screenshots.md "${outdir}/screenshots/README.md"
+
+            # 打包成 zip，运营直接下载上传
+            ( cd dist/third-party && zip -qr "${market}-doubao-murmurtv-${VERSION}.zip" "${market}" )
+            echo "已生成 dist/third-party/${market}"
+          done
+
+          find dist/third-party -maxdepth 2 -type f | sort
+
+      - name: 上传渠道包为 workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-tv-third-party-${{ needs.prepare.outputs.version_name }}
+          path: dist/third-party/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      # 可选：如果团队有对象存储（AWS S3 / 兼容 S3 的 OSS），顺手同步一份给运营。
+      # 没配凭证就整步跳过，绝不 fail。
+      - name: 探测对象存储凭证
+        env:
+          HAS_AWS: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
+          HAS_OSS: ${{ secrets.OSS_ACCESS_KEY_ID != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "${HAS_AWS}" == "true" || "${HAS_OSS}" == "true" ]]; then
+            echo "OSS_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "OSS_ENABLED=false" >> "$GITHUB_ENV"
+            echo "未配置对象存储凭证，跳过上传（不影响渠道包产出）"
+          fi
+
+      - name: 上传到对象存储（可选）
+        if: env.OSS_ENABLED == 'true'
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          VERSION: ${{ needs.prepare.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${OSS_BUCKET:-}" ]]; then
+            echo "未配置 OSS_BUCKET，跳过"
+            exit 0
+          fi
+          for f in dist/third-party/*.zip; do
+            aws s3 cp "$f" "s3://${OSS_BUCKET}/android-tv/${VERSION}/$(basename "$f")"
+          done
