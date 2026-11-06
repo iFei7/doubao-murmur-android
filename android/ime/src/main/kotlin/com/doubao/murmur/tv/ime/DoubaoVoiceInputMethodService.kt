@@ -8,6 +8,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.widget.FrameLayout
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.doubao.murmur.tv.asr.DoubaoAsrEngine
@@ -106,8 +107,8 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
         // configuration change). The previous instance is dead at this point, so its lifecycle is
         // torn down here instead of leaking a RESUMED owner until the service dies.
         composeView?.dispose()
-        val view = ImeComposeView(this)
-        view.content = {
+        val imeView = ImeComposeView(this)
+        imeView.content = {
             val state by controller.state.collectAsState()
             MurmurTvTheme {
                 MurmurKeyboardScreen(
@@ -126,8 +127,22 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
                 )
             }
         }
-        composeView = view
-        return view
+        composeView = imeView
+        // Wrap the compose view in a plain FrameLayout: the IME framework measures the input
+        // view before `WindowManager.addView` completes, and AbstractComposeView.onMeasure
+        // (final, compose-ui 1.7.5) crashes when detached because it cannot resolve a window
+        // recomposer. The container short-circuits that pre-attach pass and resumes real
+        // measurement once attached (see ImeComposeContainer's KDoc).
+        val container = ImeComposeContainer(this).apply {
+            addView(
+                imeView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        return container
     }
 
     /** TV has no room for a candidate bar; the transcript card replaces it. */

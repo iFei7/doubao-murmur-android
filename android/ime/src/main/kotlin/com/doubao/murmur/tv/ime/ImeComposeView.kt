@@ -2,6 +2,8 @@ package com.doubao.murmur.tv.ime
 
 import android.content.Context
 import android.os.Bundle
+import android.util.AttributeSet
+import android.widget.FrameLayout
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.AbstractComposeView
 import androidx.lifecycle.Lifecycle
@@ -75,6 +77,13 @@ class ImeComposeView(context: Context) : AbstractComposeView(context) {
         // inside `super.onAttachedToWindow()`, and it must observe a live owner.
         owners.markAttached()
         super.onAttachedToWindow()
+        // The pre-attach measure was short-circuited by [ImeComposeContainer] (see its KDoc);
+        // now that the view is attached, request the real pass so the composition is created
+        // through `super.onMeasure`. `isAttachedToWindow` is already true at this point, so the
+        // follow-up measure goes through `super` and creates the composition. This runs once per
+        // window binding — it cannot loop, because attach only happens once per
+        // `WindowManager.addView` and this requestLayout finds the view attached.
+        requestLayout()
     }
 
     override fun onDetachedFromWindow() {
@@ -89,6 +98,70 @@ class ImeComposeView(context: Context) : AbstractComposeView(context) {
      */
     fun dispose() {
         owners.dispose()
+    }
+}
+
+/**
+ * Height reported by [ImeComposeContainer.onMeasure] before the container is attached. Small and
+ * non-zero: zero would trip framework assertions on empty views, and the real size arrives with
+ * the post-attach layout pass.
+ */
+private const val PLACEHOLDER_HEIGHT_PX = 1
+
+/**
+ * Outer wrapper that shields [ImeComposeView] from the IME framework's pre-attach measure pass.
+ *
+ * ## Why this wrapper exists at all
+ * `AbstractComposeView.onMeasure` (compose-ui 1.7.5) unconditionally calls
+ * `ensureCompositionCreated()`, which resolves the parent composition context and, finding none,
+ * calls `WindowRecomposer_androidKt.getWindowRecomposer(view)`. That function throws
+ * `IllegalStateException("Cannot locate windowRecomposer; View is not attached to a window")`
+ * when `view.isAttachedToWindow` is false. The IME framework measures the input view *before*
+ * `WindowManager.addView` finishes (`InputMethodService.setInputView()` → measure → attach), so
+ * the first measure pass on the compose view always runs pre-attach — and crashes, which is why
+ * the keyboard never drew and the process death/rebind loop occurred.
+ *
+ * Normally one would override `onMeasure` on the compose view itself to short-circuit that pass,
+ * but `AbstractComposeView.onMeasure` is **final** in compose-ui 1.7.5, so the interception has
+ * to happen one level up: on an outer `FrameLayout` wrapping the compose view, where `onMeasure`
+ * is not final.
+ *
+ * ## Measure semantics
+ * - **Not attached:** skip `super.onMeasure` entirely — `FrameLayout`'s implementation calls
+ *   `measureChildWithMargins` on every child, which would reach the compose view and trigger the
+ *   crash we are shielding against. Instead report a conservative size directly: the width
+ *   resolved from the spec (the IME window is screen-wide, so a normal pass yields
+ *   AT_MOST/EXACTLY and resolves to a real width) and [PLACEHOLDER_HEIGHT_PX].
+ * - **Attached:** delegate to `super`, which measures the compose view normally and creates the
+ *   composition. [onAttachedToWindow] calls [requestLayout] so the real pass happens as soon as
+ *   the view tree lands in the IME window, replacing the placeholder size.
+ */
+class ImeComposeContainer @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null,
+) : FrameLayout(context, attrs) {
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        if (!isAttachedToWindow) {
+            // Do NOT call super here: it would measure children, reaching the compose view while
+            // it is still detached and triggering the windowRecomposer crash. Deliberately
+            // bypasses measureChildren/measureChildWithMargins entirely.
+            val width = getDefaultSize(suggestedMinimumWidth, widthMeasureSpec).coerceAtLeast(1)
+            val height = resolveSize(PLACEHOLDER_HEIGHT_PX, heightMeasureSpec).coerceAtLeast(1)
+            setMeasuredDimension(width, height)
+            return
+        }
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        // The pre-attach pass stored a placeholder size; now that the container (and its compose
+        // child) is attached, request a fresh layout pass so the real measurement — through
+        // `super.onMeasure` and into the composition — runs. This fires once per window binding
+        // and cannot loop: attach only happens once per `WindowManager.addView`, and this
+        // requestLayout finds the view already attached.
+        requestLayout()
     }
 }
 
