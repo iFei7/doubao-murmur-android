@@ -58,7 +58,7 @@ defaults:
 jobs:
   release:
     name: 构建并发布
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     # production / alpha 轨道绑定 GitHub Environment，可在这里配置"必须人工审批"。

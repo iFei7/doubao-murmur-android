@@ -52,7 +52,7 @@ jobs:
   # -------------------------------------------------------------------------
   static-analysis:
     name: 静态检查（detekt + lint）
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -114,7 +114,7 @@ jobs:
   # -------------------------------------------------------------------------
   unit-test:
     name: 单元测试
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     # dorny/test-reporter 需要在 PR 上写 Check Run，所以这里单独提权；
@@ -179,7 +179,7 @@ jobs:
   # -------------------------------------------------------------------------
   assemble-debug:
     name: Debug 构建
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:

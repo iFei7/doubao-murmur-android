@@ -58,7 +58,7 @@ jobs:
   # -------------------------------------------------------------------------
   prepare:
     name: 准备与校验
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version_name: ${{ steps.ver.outputs.version_name }}
       version_code: ${{ steps.ver.outputs.version_code }}
@@ -116,7 +116,7 @@ jobs:
     name: Play 晋级（${{ inputs.channel }}）
     needs: prepare
     if: startsWith(inputs.channel, 'play-') && inputs.channel != 'play-production'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # play-internal / play-alpha 各自绑定同名 Environment，可按需配置审批人
     environment: ${{ inputs.channel }}
@@ -154,7 +154,7 @@ jobs:
     name: Play 生产放量
     needs: prepare
     if: inputs.channel == 'play-production' && inputs.confirm_production == true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # 该 Environment 应配置 Required reviewers，人工点过才继续
     environment: play-production
@@ -192,7 +192,7 @@ jobs:
     name: sideload 安装包
     needs: prepare
     if: inputs.channel == 'sideload'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write
@@ -275,7 +275,7 @@ jobs:
     name: 第三方渠道提交包
     needs: prepare
     if: inputs.channel == 'third-party'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     steps:
