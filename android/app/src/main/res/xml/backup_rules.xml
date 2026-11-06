@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 and below (android:fullBackupContent). Security red line: the encrypted credential
+  store and every other shared preference file must never leave the device, neither through
+  cloud backup nor through device-to-device transfer.
+
+  EncryptedSharedPreferences values are bound to the Keystore master key of the origin device,
+  so a restored copy is useless anyway - and a backed up copy would leak the session cookie blob.
+-->
+<full-backup-content>
+
+    <!-- Explicit entry for the credential store; keeps the intent readable. -->
+    <exclude
+        domain="sharedpref"
+        path="murmur_secure_credentials.xml" />
+
+    <!-- Defence in depth: no shared preference file is backed up at all. -->
+    <exclude
+        domain="sharedpref"
+        path="." />
+
+    <!-- DataStore holds the non-secret settings; excluded so no settings survive a restore. -->
+    <exclude
+        domain="file"
+        path="datastore/" />
+
+</full-backup-content>

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Fallback mirror for :ime standalone resource linking.
+  :app declares the same names (with zh-rCN translations) and wins at merge time;
+  keep the two in sync when editing.
+-->
+<!--
+  Mirror of :app/res/xml/method.xml so that :ime can resolve its own
+  <meta-data android:name="android.view.im" android:resource="@xml/method"/> during its library
+  resource link. The :app copy is the one that ships in the APK.
+
+  Only one subtype: Mandarin voice input. English is typed through the system keyboard.
+
+  android:supportsSwitchingToNextInputMethod belongs to <input-method> (not to the manifest
+  <service> element). android:isDefault="false" makes clear the IME never asks the ROM to
+  pre-select it as the default keyboard.
+-->
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:isDefault="false"
+    android:settingsActivity="com.doubao.murmur.tv.ime.settings.ImeSettingsActivity"
+    android:supportsSwitchingToNextInputMethod="true">
+
+    <subtype
+        android:imeSubtypeLocale="zh_CN"
+        android:imeSubtypeMode="keyboard"
+        android:isAsciiCapable="false"
+        android:label="@string/ime_subtype_zh" />
+
+</input-method>

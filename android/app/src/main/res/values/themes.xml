@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  TV theme: dark, edge-to-edge, no action bar. Compose draws its own surfaces on top of
+  windowBackground, so the window colour only shows during startup.
+-->
+<resources>
+
+    <style name="Theme.MurmurTv" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF0B0B0F</item>
+        <item name="android:colorBackground">#FF0B0B0F</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <!-- android:windowLightNavigationBar is intentionally absent: it needs API 27 (minSdk 23)
+             and is meaningless on a TV, where the leanback UI runs fullscreen with no system nav bar. -->
+    </style>
+
+    <!-- Transparent host used by MicPermissionActivity so the rationale does not flash a
+         full-screen window while the system permission dialog is being prepared. -->
+    <style name="Theme.MurmurTv.Translucent" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+    </style>
+
+</resources>

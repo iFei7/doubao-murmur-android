@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  中文翻译（与 values/strings_ime.xml 的 key 集合完全一致）。
+
+  :app 在打包时会用自己 values-zh-rCN/strings.xml 里的同名 key 覆盖本文件 —— 应用模块的
+  资源优先级高于库模块。保留这份副本是为了让 :ime 在不依赖 :app 的情况下仍然可读（例如
+  单独跑 UI 预览或截图测试）。
+-->
+<resources>
+
+    <!-- 键盘标识（AndroidManifest.xml 与 res/xml/method.xml 引用） -->
+    <string name="ime_name">豆包语音输入法</string>
+    <string name="ime_subtype_zh">中文（语音）</string>
+
+    <!-- 状态 -->
+    <string name="ime_state_idle">准备就绪</string>
+    <string name="ime_state_connecting">连接中</string>
+    <string name="ime_state_listening">正在聆听</string>
+    <string name="ime_state_transcribing">识别中</string>
+    <string name="ime_state_committed">已上屏</string>
+
+    <!-- 状态标签 -->
+    <string name="ime_status_not_signed_in">未登录</string>
+    <string name="ime_status_mic_denied">麦克风未授权</string>
+    <string name="login_success">已登录</string>
+
+    <!-- 转写卡片 -->
+    <string name="ime_preview_placeholder">按住 OK 说话，松手即上屏</string>
+
+    <!-- 操作 -->
+    <string name="ime_action_login">去登录</string>
+    <string name="ime_action_clear">清空</string>
+    <string name="ime_action_cancel">取消</string>
+    <string name="ime_action_delete">删除</string>
+    <string name="ime_action_newline">换行</string>
+    <string name="ime_action_hide">收起</string>
+    <string name="ime_action_settings">输入法设置</string>
+    <string name="ime_key_fallback_system">切换回系统键盘</string>
+    <string name="mic_action_grant">授予麦克风权限</string>
+    <string name="action_back">返回</string>
+
+    <!-- 按键提示 -->
+    <string name="ime_hint_hold_to_talk">按住 OK 说话</string>
+    <string name="ime_hint_release_to_finish">松手即上屏</string>
+    <string name="ime_hint_back_hide">BACK 收起</string>
+    <string name="ime_hint_back_cancel">BACK 取消</string>
+    <string name="ime_hint_search_toggle">SEARCH 开始/结束</string>
+    <string name="ime_hint_menu_settings">MENU 设置</string>
+
+    <!-- 错误 -->
+    <string name="ime_error_generic">语音输入失败，请重试</string>
+    <string name="ime_error_not_signed_in">尚未登录豆包</string>
+    <string name="ime_error_no_microphone">未检测到麦克风</string>
+    <string name="ime_error_microphone">麦克风不可用，请检查设备</string>
+    <string name="ime_error_no_speech">没有听清，请再说一次</string>
+    <string name="ime_error_timeout">识别超时，请重试</string>
+    <string name="ime_error_server">识别服务出错（%1$d）</string>
+    <string name="error_login_expired">登录已过期，请重新登录</string>
+    <string name="error_network_unavailable">网络不可用，请检查连接</string>
+    <string name="error_mic_permission_denied">麦克风权限被拒绝</string>
+
+    <!-- 设置页 -->
+    <string name="ime_settings_title">输入法设置</string>
+    <string name="ime_settings_section_system">系统状态</string>
+    <string name="ime_settings_ime_enabled">输入法已启用</string>
+    <string name="ime_settings_ime_disabled">输入法未启用</string>
+    <string name="ime_settings_ime_selected">当前键盘</string>
+    <string name="ime_settings_ime_not_selected">不是当前键盘</string>
+    <string name="ime_settings_action_enable_system">去系统设置启用</string>
+    <string name="ime_settings_action_pick_ime">选择输入法</string>
+    <string name="ime_settings_section_commit">文本上屏方式</string>
+    <string name="ime_settings_commit_composing">实时预览</string>
+    <string name="ime_settings_commit_direct">仅最终结果</string>
+    <string name="ime_settings_commit_hint">实时预览会在说话过程中持续更新输入框。若某个输入框出现乱码或重复文字，请改为「仅最终结果」。</string>
+    <string name="ime_settings_section_timeout">等待最终结果</string>
+    <string name="ime_settings_timeout_seconds">%1$s 秒</string>
+    <string name="ime_settings_timeout_hint">松手后等待服务端补齐整句的最长时间。网络较慢时可调大。</string>
+    <string name="ime_settings_section_privacy">隐私</string>
+    <string name="ime_settings_privacy_text">语音仅用于实时转写，不在本机保存；识别结果直接写入当前输入框。</string>
+    <string name="ime_settings_action_sign_out">退出登录</string>
+    <string name="ime_settings_sign_out_done">已退出登录</string>
+
+</resources>

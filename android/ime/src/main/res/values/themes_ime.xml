@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Fallback mirror for :ime standalone resource linking.
+  :app declares the same names (with zh-rCN translations) and wins at merge time;
+  keep the two in sync when editing.
+-->
+<!--
+  Mirror of :app/res/values/themes.xml, limited to the theme referenced by the
+  ImeSettingsActivity entry in :ime's manifest.
+
+  The library needs the style to be resolvable during its own resource link; :app re-declares the
+  same style and, being the application module, its definition takes precedence in the APK.
+-->
+<resources>
+
+    <style name="Theme.MurmurTv" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF0B0B0F</item>
+        <item name="android:colorBackground">#FF0B0B0F</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+
+</resources>

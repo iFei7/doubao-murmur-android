@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Fallback mirror for :ime standalone resource linking.
+  :app declares the same names (with zh-rCN translations) and wins at merge time;
+  keep the two in sync when editing.
+-->
+<!--
+  IME-owned strings (English baseline).
+
+  Why this file duplicates some strings that also live in :app/res/values/strings.xml: a library
+  module links its own resources, so every resource referenced from :ime's manifest (and every
+  R.string used by :ime Kotlin code) must exist inside :ime. At packaging time the :app copy wins —
+  the application module always overrides library resources, including the zh-rCN translation — so
+  the duplicated values must stay identical to :app. Strings that only :ime uses (keyboard states,
+  settings screen) live here alone.
+-->
+<resources>
+
+    <!-- Keyboard identity (also referenced by AndroidManifest.xml and res/xml/method.xml) -->
+    <string name="ime_name">Doubao Voice Input</string>
+    <string name="ime_subtype_zh">Chinese (voice)</string>
+
+    <!-- State labels -->
+    <string name="ime_state_idle">Ready</string>
+    <string name="ime_state_connecting">Connecting</string>
+    <string name="ime_state_listening">Listening</string>
+    <string name="ime_state_transcribing">Transcribing</string>
+    <string name="ime_state_committed">Inserted</string>
+
+    <!-- Status chips -->
+    <string name="ime_status_not_signed_in">Not signed in</string>
+    <string name="ime_status_mic_denied">Microphone not granted</string>
+    <string name="login_success">Signed in</string>
+
+    <!-- Transcript card -->
+    <string name="ime_preview_placeholder">Hold OK and speak, release to insert</string>
+
+    <!-- Actions -->
+    <string name="ime_action_login">Sign in</string>
+    <string name="ime_action_clear">Clear</string>
+    <string name="ime_action_cancel">Cancel</string>
+    <string name="ime_action_delete">Delete</string>
+    <string name="ime_action_newline">New line</string>
+    <string name="ime_action_hide">Hide</string>
+    <string name="ime_action_settings">Input method settings</string>
+    <string name="ime_key_fallback_system">Switch to system keyboard</string>
+    <string name="mic_action_grant">Grant microphone access</string>
+    <string name="action_back">Back</string>
+
+    <!-- Key hints -->
+    <string name="ime_hint_hold_to_talk">Hold OK to talk</string>
+    <string name="ime_hint_release_to_finish">Release to insert</string>
+    <string name="ime_hint_back_hide">BACK to hide</string>
+    <string name="ime_hint_back_cancel">BACK to cancel</string>
+    <string name="ime_hint_search_toggle">SEARCH to start or stop</string>
+    <string name="ime_hint_menu_settings">MENU for settings</string>
+
+    <!-- Errors -->
+    <string name="ime_error_generic">Voice input failed, please try again</string>
+    <string name="ime_error_not_signed_in">Not signed in to Doubao</string>
+    <string name="ime_error_no_microphone">No microphone found</string>
+    <string name="ime_error_microphone">Microphone unavailable, please check the device</string>
+    <string name="ime_error_no_speech">Nothing recognised, please try again</string>
+    <string name="ime_error_timeout">Recognition timed out, please try again</string>
+    <string name="ime_error_server">Recognition service error (%1$d)</string>
+    <string name="error_login_expired">Session expired, please sign in again</string>
+    <string name="error_network_unavailable">Network unavailable, check the connection</string>
+    <string name="error_mic_permission_denied">Microphone permission denied</string>
+
+    <!-- Settings screen -->
+    <string name="ime_settings_title">Voice input settings</string>
+    <string name="ime_settings_section_system">System status</string>
+    <string name="ime_settings_ime_enabled">Input method enabled</string>
+    <string name="ime_settings_ime_disabled">Input method not enabled</string>
+    <string name="ime_settings_ime_selected">Current keyboard</string>
+    <string name="ime_settings_ime_not_selected">Not the current keyboard</string>
+    <string name="ime_settings_action_enable_system">Enable in system settings</string>
+    <string name="ime_settings_action_pick_ime">Choose input method</string>
+    <string name="ime_settings_section_commit">Text insertion</string>
+    <string name="ime_settings_commit_composing">Live preview</string>
+    <string name="ime_settings_commit_direct">Final text only</string>
+    <string name="ime_settings_commit_hint">Live preview updates the field while you speak. If a field shows garbled or duplicated text, switch to final text only.</string>
+    <string name="ime_settings_section_timeout">Wait for the final result</string>
+    <string name="ime_settings_timeout_seconds">%1$s s</string>
+    <string name="ime_settings_timeout_hint">How long the keyboard waits for the server to finish the sentence after you release OK. Increase it on a slow connection.</string>
+    <string name="ime_settings_section_privacy">Privacy</string>
+    <string name="ime_settings_privacy_text">Audio is streamed only to be transcribed. Nothing is stored on this device, and the recognised text is written straight into the current field.</string>
+    <string name="ime_settings_action_sign_out">Sign out</string>
+    <string name="ime_settings_sign_out_done">Signed out</string>
+
+</resources>

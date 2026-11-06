@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Input method metadata referenced by :ime via <meta-data android:name="android.view.im">.
+  Only one subtype: Mandarin voice input. English is typed through the system keyboard.
+
+  android:supportsSwitchingToNextInputMethod is declared here (it is an <input-method> attribute,
+  not a manifest <service> attribute). android:isDefault="false" states explicitly that we never
+  ask the ROM to pre-select this IME, so a fresh install does not hijack the default keyboard.
+-->
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:isDefault="false"
+    android:settingsActivity="com.doubao.murmur.tv.ime.settings.ImeSettingsActivity"
+    android:supportsSwitchingToNextInputMethod="true">
+
+    <subtype
+        android:imeSubtypeLocale="zh_CN"
+        android:imeSubtypeMode="keyboard"
+        android:isAsciiCapable="false"
+        android:label="@string/ime_subtype_zh" />
+
+</input-method>

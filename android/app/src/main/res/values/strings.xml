@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  English baseline. res/values-zh-rCN/strings.xml must contain exactly the same key set.
+-->
+<resources>
+
+    <!-- Product -->
+    <string name="app_name">Doubao Murmur TV</string>
+    <string name="ime_name">Doubao Voice Input</string>
+    <string name="ime_subtype_zh">Chinese (voice)</string>
+
+    <!-- Launcher / home -->
+    <string name="main_title">Doubao Murmur TV</string>
+    <string name="main_subtitle">Hold the remote to talk, release to insert text</string>
+    <string name="main_action_login">Sign in to Doubao</string>
+    <string name="main_action_enable_ime">Enable voice input method</string>
+    <string name="main_action_mic">Microphone permission</string>
+    <string name="main_action_diagnostics">Diagnostics</string>
+    <string name="main_action_about">About</string>
+
+    <!-- Login -->
+    <string name="login_title">Sign in</string>
+    <string name="login_subtitle">Sign in on the page below so the app can reuse your Doubao session</string>
+    <string name="login_action_sign_in">Open sign-in page</string>
+    <string name="login_action_cancel">Cancel</string>
+    <string name="login_progress">Waiting for sign-in to complete</string>
+    <string name="login_success">Signed in</string>
+    <string name="login_failure">Sign-in failed, please try again</string>
+
+    <!-- Enable input method -->
+    <string name="enable_ime_title">Enable voice input</string>
+    <string name="enable_ime_description">Two steps: allow the keyboard in system settings, then select it as the current input method</string>
+    <string name="enable_ime_step_enable">Step 1: enable Doubao Voice Input in the keyboard list</string>
+    <string name="enable_ime_step_select">Step 2: select Doubao Voice Input as the current keyboard</string>
+    <string name="enable_ime_action_open_settings">Open keyboard settings</string>
+    <string name="enable_ime_state_enabled">Enabled</string>
+
+    <!-- Microphone -->
+    <string name="mic_title">Microphone</string>
+    <string name="mic_description">Voice input needs microphone access. External USB or Bluetooth microphones are supported</string>
+    <string name="mic_action_grant">Grant microphone access</string>
+    <string name="mic_state_granted">Microphone granted</string>
+
+    <!-- Diagnostics -->
+    <string name="diagnostics_title">Diagnostics</string>
+    <string name="diagnostics_action_run">Run checks</string>
+    <string name="diagnostics_action_copy">Copy report</string>
+
+    <!-- About -->
+    <string name="about_title">About</string>
+    <string name="about_version_label">Version</string>
+    <string name="about_license_label">License</string>
+
+    <!-- IME overlay -->
+    <string name="ime_hint_hold_to_talk">Hold OK to talk</string>
+    <string name="ime_state_listening">Listening</string>
+    <string name="ime_state_idle">Ready</string>
+    <string name="ime_action_settings">Input method settings</string>
+    <string name="ime_key_hold_to_talk">Hold OK to talk</string>
+    <string name="ime_key_fallback_system">Switch to system keyboard</string>
+
+    <!-- IME keyboard (owned by :ime, mirrored here so the app module keeps the single source of
+         truth for user visible text; the library copy in :ime/values/strings_ime.xml must match) -->
+    <string name="ime_state_connecting">Connecting</string>
+    <string name="ime_state_transcribing">Transcribing</string>
+    <string name="ime_state_committed">Inserted</string>
+    <string name="ime_status_not_signed_in">Not signed in</string>
+    <string name="ime_status_mic_denied">Microphone not granted</string>
+    <string name="ime_preview_placeholder">Hold OK and speak, release to insert</string>
+    <string name="ime_action_login">Sign in</string>
+    <string name="ime_action_clear">Clear</string>
+    <string name="ime_action_cancel">Cancel</string>
+    <string name="ime_action_delete">Delete</string>
+    <string name="ime_action_newline">New line</string>
+    <string name="ime_action_hide">Hide</string>
+    <string name="ime_hint_release_to_finish">Release to insert</string>
+    <string name="ime_hint_back_hide">BACK to hide</string>
+    <string name="ime_hint_back_cancel">BACK to cancel</string>
+    <string name="ime_hint_search_toggle">SEARCH to start or stop</string>
+    <string name="ime_hint_menu_settings">MENU for settings</string>
+    <string name="ime_error_generic">Voice input failed, please try again</string>
+    <string name="ime_error_not_signed_in">Not signed in to Doubao</string>
+    <string name="ime_error_no_microphone">No microphone found</string>
+    <string name="ime_error_microphone">Microphone unavailable, please check the device</string>
+    <string name="ime_error_no_speech">Nothing recognised, please try again</string>
+    <string name="ime_error_timeout">Recognition timed out, please try again</string>
+    <string name="ime_error_server">Recognition service error (%1$d)</string>
+    <string name="ime_settings_title">Voice input settings</string>
+    <string name="ime_settings_section_system">System status</string>
+    <string name="ime_settings_ime_enabled">Input method enabled</string>
+    <string name="ime_settings_ime_disabled">Input method not enabled</string>
+    <string name="ime_settings_ime_selected">Current keyboard</string>
+    <string name="ime_settings_ime_not_selected">Not the current keyboard</string>
+    <string name="ime_settings_action_enable_system">Enable in system settings</string>
+    <string name="ime_settings_action_pick_ime">Choose input method</string>
+    <string name="ime_settings_section_commit">Text insertion</string>
+    <string name="ime_settings_commit_composing">Live preview</string>
+    <string name="ime_settings_commit_direct">Final text only</string>
+    <string name="ime_settings_commit_hint">Live preview updates the field while you speak. If a field shows garbled or duplicated text, switch to final text only.</string>
+    <string name="ime_settings_section_timeout">Wait for the final result</string>
+    <string name="ime_settings_timeout_seconds">%1$s s</string>
+    <string name="ime_settings_timeout_hint">How long the keyboard waits for the server to finish the sentence after you release OK. Increase it on a slow connection.</string>
+    <string name="ime_settings_section_privacy">Privacy</string>
+    <string name="ime_settings_privacy_text">Audio is streamed only to be transcribed. Nothing is stored on this device, and the recognised text is written straight into the current field.</string>
+    <string name="ime_settings_action_sign_out">Sign out</string>
+    <string name="ime_settings_sign_out_done">Signed out</string>
+
+    <!-- Shared actions -->
+    <string name="action_back">Back</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_close">Close</string>
+
+    <!-- Errors -->
+    <string name="error_login_expired">Session expired, please sign in again</string>
+    <string name="error_network_unavailable">Network unavailable, check the connection</string>
+    <string name="error_mic_permission_denied">Microphone permission denied</string>
+
+    <!-- Launcher status cards, diagnostics sections and login hint (added by :app) -->
+    <string name="home_section_actions">Actions</string>
+    <string name="home_remaining_steps">%1$d step(s) left before voice input works</string>
+    <string name="home_all_ready">Everything is ready</string>
+    <string name="home_version_line">Version %1$s · %2$s · %3$s</string>
+    <string name="state_todo">Not done</string>
+    <string name="action_refresh">Check again</string>
+    <string name="mic_state_not_granted">Not granted</string>
+    <string name="mic_state_missing">No microphone detected on this device</string>
+    <string name="mic_permanently_denied_hint">Microphone permission was denied permanently. Enable it in the system app settings.</string>
+    <string name="ime_state_off">Not enabled</string>
+    <string name="ime_state_not_selected">Not the current keyboard</string>
+    <string name="ime_action_pick">Choose keyboard</string>
+    <string name="ime_adb_hint_title">If this device has no keyboard settings screen, enable the input method over adb:</string>
+    <string name="login_not_detected">Sign-in was not detected. Finish signing in on the page, then retry</string>
+    <string name="login_action_retry">I have signed in, retry</string>
+    <string name="login_webview_unavailable">This device has no system WebView, so signing in on the TV is not possible</string>
+    <string name="login_hint_scan">Scan the code with your phone or type your account. This screen closes once you are signed in.</string>
+    <string name="about_body">Version %1$s (%2$s)\n\nVoice recognition reuses your Doubao web session. The session is encrypted with the Android Keystore on this device only and is never uploaded anywhere else.\n\nLicense: MIT</string>
+    <string name="diagnostics_section_device">Device</string>
+    <string name="diagnostics_section_mic">Microphone</string>
+    <string name="diagnostics_section_ime">Input method</string>
+    <string name="diagnostics_section_login">Sign-in</string>
+    <string name="diagnostics_section_network">Network self-test</string>
+    <string name="diagnostics_network_hint">Opens one ASR session and sends 200 ms of silence</string>
+    <string name="diagnostics_network_running">Running…</string>
+    <string name="diagnostics_copied">Report copied</string>
+
+</resources>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+
+        <!--
+          Fixed FQCN: com.doubao.murmur.tv.ime.DoubaoVoiceInputMethodService
+          The implementation must not be renamed, the manifest is the contract with :app.
+
+          No android:process: the service runs in the app process, which keeps the shared
+          credentials/audio singletons in memory.
+
+          android:supportsSwitchingToNextInputMethod is deliberately NOT declared on this
+          <service> element: it is an <input-method> attribute and its only effective location is
+          res/xml/method.xml. Writing it here would misleadingly suggest it does something.
+        -->
+        <service
+            android:name="com.doubao.murmur.tv.ime.DoubaoVoiceInputMethodService"
+            android:directBootAware="false"
+            android:exported="true"
+            android:label="@string/ime_name"
+            android:permission="android.permission.BIND_INPUT_METHOD">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <!-- Points at :app/res/xml/method.xml which declares the zh_CN voice subtype. -->
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/method" />
+        </service>
+
+        <activity
+            android:name="com.doubao.murmur.tv.ime.settings.ImeSettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.MurmurTv" />
+
+    </application>
+
+</manifest>

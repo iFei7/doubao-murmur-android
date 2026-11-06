@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+      Foreground service permissions are only used by the degraded path where the IME window is
+      hidden (e.g. the user pressed HOME while talking) and capture has to continue briefly.
+      The primary path captures audio while the input view is visible and needs no service.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- TV first: Leanback launcher is mandatory, everything else is optional hardware. -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="true" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <!--
+      A microphone is not mandatory: TVs may ship an external USB or Bluetooth microphone that is
+      probed at runtime (see MicProbe in :audio).
+    -->
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.gamepad"
+        android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:banner="@drawable/tv_banner"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@drawable/ic_launcher_tv"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MurmurTv">
+
+        <!-- Required by Macrobenchmark (:benchmark) so that release builds can be profiled. -->
+        <profileable android:shell="true" />
+
+        <activity
+            android:name="com.doubao.murmur.tv.app.MainActivity"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|uiMode"
+            android:exported="true"
+            android:screenOrientation="landscape">
+            <!-- Leanback launcher entry point. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <!-- Plain launcher entry so the app also shows up on AOSP/phone-style launchers. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="com.doubao.murmur.tv.app.login.LoginActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.doubao.murmur.tv.app.permission.MicPermissionActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:theme="@style/Theme.MurmurTv.Translucent" />
+
+        <activity
+            android:name="com.doubao.murmur.tv.app.diagnostics.DiagnosticsActivity"
+            android:exported="false" />
+
+    </application>
+
+</manifest>

@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- :auth uses a WebView created at runtime, so no component or permission is declared here. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
