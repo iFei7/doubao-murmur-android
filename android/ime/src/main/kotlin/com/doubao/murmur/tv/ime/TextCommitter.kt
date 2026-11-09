@@ -1,8 +1,12 @@
 package com.doubao.murmur.tv.ime
 
 import android.text.InputType
+import android.util.Log
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import kotlinx.coroutines.CancellationException
+
+private const val TAG = "TextCommitter"
 
 /**
  * The only place in the IME that talks to the host application's text field.
@@ -36,6 +40,12 @@ import android.view.inputmethod.InputConnection
  *
  * All calls are wrapped in `beginBatchEdit`/`endBatchEdit` so that the host does not run its
  * text watchers once per primitive operation while a sentence streams in.
+ *
+ * Every [InputConnection] call is also a *synchronous Binder transaction* into the host app. When
+ * the host has been destroyed or is stuck it throws `DeadObjectException` / `RemoteException`;
+ * [withConnection] degrades such a failure to a no-op instead of letting it escape through the IME
+ * callbacks and tear down the input pipeline. [CancellationException] is rethrown so structured
+ * concurrency is never broken.
  */
 class TextCommitter(
     private val connectionProvider: () -> InputConnection?,
@@ -83,13 +93,9 @@ class TextCommitter(
             abandonComposing()
             return
         }
-        val connection = connection() ?: return
-        composingText = text
-        connection.beginBatchEdit()
-        try {
+        withConnection { connection ->
+            composingText = text
             connection.setComposingText(text, 1)
-        } finally {
-            connection.endBatchEdit()
         }
     }
 
@@ -105,25 +111,19 @@ class TextCommitter(
             abandonComposing()
             return
         }
-        val connection = connection() ?: return
-        connection.beginBatchEdit()
-        try {
+        withConnection { connection ->
             if (composingText.isNotEmpty()) {
                 connection.finishComposingText()
             }
             composingText = ""
             connection.commitText(text, 1)
-        } finally {
-            connection.endBatchEdit()
         }
     }
 
     /** Deletes [count] characters before the cursor (backspace). */
     fun deleteBackward(count: Int) {
         if (count <= 0) return
-        val connection = connection() ?: return
-        connection.beginBatchEdit()
-        try {
+        withConnection { connection ->
             // While a composing region exists, deleteSurroundingText would target the host text
             // *behind* the preview and leave the preview intact. Finish it first so that the
             // backspace deletes the character the viewer is actually looking at.
@@ -132,23 +132,17 @@ class TextCommitter(
                 composingText = ""
             }
             connection.deleteSurroundingText(count, 0)
-        } finally {
-            connection.endBatchEdit()
         }
     }
 
     /** Inserts a line break, which is what the ENTER key does on a multi-line field. */
     fun newline() {
-        val connection = connection() ?: return
-        connection.beginBatchEdit()
-        try {
+        withConnection { connection ->
             if (composingText.isNotEmpty()) {
                 connection.finishComposingText()
                 composingText = ""
             }
             connection.commitText("\n", 1)
-        } finally {
-            connection.endBatchEdit()
         }
     }
 
@@ -161,12 +155,34 @@ class TextCommitter(
      */
     fun abandonComposing() {
         composingText = ""
-        val connection = connection() ?: return
-        connection.beginBatchEdit()
-        try {
+        withConnection { connection ->
             connection.finishComposingText()
-        } finally {
-            connection.endBatchEdit()
+        }
+    }
+
+    /**
+     * Runs a batch of synchronous [InputConnection] calls defensively.
+     *
+     * Each call on an [InputConnection] is a synchronous Binder transaction into the host app. A
+     * host that is gone or not responding throws `DeadObjectException` (or another
+     * `RemoteException`); an exception escaping from here would unwind the IME callbacks and could
+     * take down the input pipeline, so it is degraded to a no-op - there is no field left to write
+     * into anyway. [CancellationException] is rethrown so a coroutine cancellation is never
+     * swallowed (structured concurrency must keep working). Only the failure *type* is logged,
+     * never the transcript or a credential.
+     */
+    private fun withConnection(block: (InputConnection) -> Unit) {
+        val connection = connection() ?: return
+        runCatching {
+            connection.beginBatchEdit()
+            try {
+                block(connection)
+            } finally {
+                connection.endBatchEdit()
+            }
+        }.onFailure { throwable ->
+            if (throwable is CancellationException) throw throwable
+            Log.w(TAG, "InputConnection call failed: ${throwable::class.java.simpleName}")
         }
     }
 

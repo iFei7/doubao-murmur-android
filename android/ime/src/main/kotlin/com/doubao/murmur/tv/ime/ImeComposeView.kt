@@ -3,6 +3,7 @@ package com.doubao.murmur.tv.ime
 import android.content.Context
 import android.os.Bundle
 import android.util.AttributeSet
+import android.view.View
 import android.widget.FrameLayout
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.AbstractComposeView
@@ -76,6 +77,11 @@ class ImeComposeView(context: Context) : AbstractComposeView(context) {
         // Move to RESUMED *before* super: `AbstractComposeView` installs the window recomposer
         // inside `super.onAttachedToWindow()`, and it must observe a live owner.
         owners.markAttached()
+        // The composition is created *inside* super.onAttachedToWindow(), and it resolves the
+        // three owners from an ancestor of this view, not from the leaf (see
+        // installOwnersOnWindowRoot). Lift them to the window root before super so the lookup
+        // cannot fail.
+        installOwnersOnWindowRoot()
         super.onAttachedToWindow()
         // The pre-attach measure was short-circuited by [ImeComposeContainer] (see its KDoc);
         // now that the view is attached, request the real pass so the composition is created
@@ -99,6 +105,47 @@ class ImeComposeView(context: Context) : AbstractComposeView(context) {
     fun dispose() {
         owners.dispose()
     }
+
+    /**
+     * Installs the three owners on the *topmost* view of this window, not only on this compose
+     * view.
+     *
+     * `AbstractComposeView.onAttachedToWindow()` creates the composition inside its `super` call
+     * (`ensureCompositionCreated()` -> `resolveParentCompositionContext()` ->
+     * `WindowRecomposer_androidKt.getWindowRecomposer(view)`). That helper calls
+     * `getContentChild(view)`, which walks **up** the parent chain and returns either the node whose
+     * id is `android.R.id.content` or the topmost [View] - always an *ancestor* of this compose
+     * view, never the leaf itself. `WindowRecomposerFactory.LifecycleAware` then calls
+     * `ViewTreeLifecycleOwner.get(ancestor)`, whose lifecycle 2.8.6 implementation is
+     * `generateSequence(v) { parent as? View }.mapNotNull { getTag(...) }.firstOrNull()`: it also
+     * only walks **up**. Owners installed on the leaf (in the `init` block) are therefore invisible,
+     * and the lookup throws `IllegalStateException("ViewTreeLifecycleOwner not found from ...")`.
+     * `ComponentActivity` avoids this by installing the owners on `window.decorView`; an IME has no
+     * Activity, so the owners must be lifted to the topmost view here. The root covers both
+     * `getContentChild` outcomes: it is either the returned node itself or an ancestor on the same
+     * upward path.
+     *
+     * This MUST run before `super.onAttachedToWindow()` - the composition is created *inside* that
+     * call (compose-ui 1.7.5 bytecode), so a later install would already be too late. The same
+     * [owners] instance is reused everywhere to keep one lifecycle; setting a tag twice is
+     * idempotent, which is why [ImeComposeContainer] can safely trigger this a second time.
+     */
+    private fun installOwnersOnWindowRoot() {
+        var top: View = this
+        while (top.parent is View) {
+            top = top.parent as View
+        }
+        top.setViewTreeLifecycleOwner(owners)
+        top.setViewTreeViewModelStoreOwner(owners)
+        top.setViewTreeSavedStateRegistryOwner(owners)
+    }
+
+    /**
+     * Re-runs [installOwnersOnWindowRoot] for [ImeComposeContainer], which attaches before its
+     * children and can therefore lift the owners a little earlier. Kept `internal` (not public):
+     * only the wrapper in this module needs it, and it must reuse this view's single [owners].
+     */
+    internal fun installOwnersOnWindowRootForContainer() = installOwnersOnWindowRoot()
 }
 
 /**
@@ -117,8 +164,8 @@ private const val PLACEHOLDER_HEIGHT_PX = 1
  * calls `WindowRecomposer_androidKt.getWindowRecomposer(view)`. That function throws
  * `IllegalStateException("Cannot locate windowRecomposer; View is not attached to a window")`
  * when `view.isAttachedToWindow` is false. The IME framework measures the input view *before*
- * `WindowManager.addView` finishes (`InputMethodService.setInputView()` → measure → attach), so
- * the first measure pass on the compose view always runs pre-attach — and crashes, which is why
+ * `WindowManager.addView` finishes (`InputMethodService.setInputView()` -> measure -> attach), so
+ * the first measure pass on the compose view always runs pre-attach - and crashes, which is why
  * the keyboard never drew and the process death/rebind loop occurred.
  *
  * Normally one would override `onMeasure` on the compose view itself to short-circuit that pass,
@@ -127,7 +174,7 @@ private const val PLACEHOLDER_HEIGHT_PX = 1
  * is not final.
  *
  * ## Measure semantics
- * - **Not attached:** skip `super.onMeasure` entirely — `FrameLayout`'s implementation calls
+ * - **Not attached:** skip `super.onMeasure` entirely - `FrameLayout`'s implementation calls
  *   `measureChildWithMargins` on every child, which would reach the compose view and trigger the
  *   crash we are shielding against. Instead report a conservative size directly: the width
  *   resolved from the spec (the IME window is screen-wide, so a normal pass yields
@@ -155,10 +202,18 @@ class ImeComposeContainer @JvmOverloads constructor(
     }
 
     override fun onAttachedToWindow() {
+        // The container sits above the compose child and attaches before it: lift the owners to the
+        // window root here as well, so the composition created inside the child's
+        // AbstractComposeView.super.onAttachedToWindow() finds them even if that path is reached
+        // before the child's own install. Reuses the child's single owner instance (through the
+        // internal entry point on ImeComposeView); setting the same tags twice is idempotent.
+        for (index in 0 until childCount) {
+            (getChildAt(index) as? ImeComposeView)?.installOwnersOnWindowRootForContainer()
+        }
         super.onAttachedToWindow()
         // The pre-attach pass stored a placeholder size; now that the container (and its compose
-        // child) is attached, request a fresh layout pass so the real measurement — through
-        // `super.onMeasure` and into the composition — runs. This fires once per window binding
+        // child) is attached, request a fresh layout pass so the real measurement - through
+        // `super.onMeasure` and into the composition - runs. This fires once per window binding
         // and cannot loop: attach only happens once per `WindowManager.addView`, and this
         // requestLayout finds the view already attached.
         requestLayout()

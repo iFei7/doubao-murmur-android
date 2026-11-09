@@ -57,6 +57,9 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
 
     private var composeView: ImeComposeView? = null
 
+    /** Outer container returned from onCreateInputView; the authoritative rect for onComputeInsets. */
+    private var inputContainer: ImeComposeContainer? = null
+
     /** `eventTime` of the current DPAD_CENTER press, used for the 400 ms push-to-talk threshold. */
     private var centerDownAtMs = 0L
 
@@ -142,6 +145,7 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
                 ),
             )
         }
+        inputContainer = container
         return container
     }
 
@@ -182,26 +186,54 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
      *   the framework derives the region from `contentTopInsets`, which we just set to 0 — that
      *   would make the whole (possibly full-screen) window swallow every touch. An explicit
      *   region is the only value that is correct under both window sizes.
+     *
+     * Until the container has a real layout we must NOT fall back to the framework defaults: the
+     * default `TOUCHABLE_INSETS_VISIBLE` lets the whole IME window swallow touches and keys, which
+     * is the "keyboard is up but nothing responds" symptom. The pre-attach placeholder measure
+     * reports only a 1 px height, so [MIN_LAID_OUT_HEIGHT_DP] is the threshold that separates that
+     * frame from a real layout:
+     * - **real layout**: positive width and a height above [MIN_LAID_OUT_HEIGHT_DP] - publish the
+     *   container's actual rectangle;
+     * - **placeholder**: container missing, or width/height still 0 or the 1 px measure - publish
+     *   a conservative bottom strip (at most 1/3 of the screen).
+     * Both branches set an explicit `TOUCHABLE_INSETS_REGION`, so the host keeps receiving input
+     * above the keyboard under either window size.
      */
     override fun onComputeInsets(outInsets: Insets) {
         super.onComputeInsets(outInsets)
-        val view = composeView
-        if (view == null || view.width == 0 || view.height == 0) {
-            // Not laid out yet: keep the framework defaults rather than publishing an empty region.
-            return
-        }
-        val location = IntArray(2)
-        view.getLocationInWindow(location)
-        val top = location[1].coerceAtLeast(0)
         outInsets.contentTopInsets = 0
-        outInsets.visibleTopInsets = top
-        outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
-        outInsets.touchableRegion.set(
-            location[0],
-            top,
-            location[0] + view.width,
-            top + view.height,
-        )
+        val metrics = resources.displayMetrics
+        val minLaidOutHeightPx = (MIN_LAID_OUT_HEIGHT_DP * metrics.density).toInt().coerceAtLeast(1)
+        val container = inputContainer
+        if (container != null && container.width > 0 && container.height > minLaidOutHeightPx) {
+            val location = IntArray(2)
+            container.getLocationInWindow(location)
+            val top = location[1].coerceAtLeast(0)
+            outInsets.visibleTopInsets = top
+            outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
+            outInsets.touchableRegion.set(
+                location[0],
+                top,
+                location[0] + container.width,
+                top + container.height,
+            )
+        } else {
+            // Placeholder: the container is missing or still reports the 1 px pre-attach measure.
+            // Publish an explicit, conservative bottom strip rather than the framework default
+            // (which would cover the whole screen). A TV keyboard is ~240 dp tall; clamp to at
+            // most 1/3 of the screen so the region never covers the top area where the host's
+            // input lives.
+            val screenWidth = metrics.widthPixels
+            val screenHeight = metrics.heightPixels
+            val height = minOf(
+                (PLACEHOLDER_KEYBOARD_HEIGHT_DP * metrics.density).toInt(),
+                screenHeight / 3,
+            ).coerceAtLeast(1)
+            val top = (screenHeight - height).coerceAtLeast(0)
+            outInsets.visibleTopInsets = top
+            outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
+            outInsets.touchableRegion.set(0, top, screenWidth, screenHeight)
+        }
     }
 
     // ------------------------------------------------------------------ keys
@@ -320,6 +352,7 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
         guarded("release") { controller.release() }
         composeView?.dispose()
         composeView = null
+        inputContainer = null
         runCatching {
             httpClient.dispatcher.executorService.shutdown()
             httpClient.connectionPool.evictAll()
@@ -396,6 +429,20 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
 
         /** Matches `androidx.compose.foundation`'s long-press constant, i.e. what viewers expect. */
         const val HOLD_THRESHOLD_MS = 400L
+
+        /**
+         * Conservative expected keyboard height (dp) for the touchable region published before the
+         * input container has been laid out. Clamped to at most 1/3 of the screen in
+         * [onComputeInsets] so the placeholder region never covers the whole window.
+         */
+        const val PLACEHOLDER_KEYBOARD_HEIGHT_DP = 240
+
+        /**
+         * Minimum container height (dp) treated as a real layout. The pre-attach placeholder
+         * measure reports only 1 px, so a height at or below this threshold must not be used to
+         * build the touchable region from an essentially empty view rectangle.
+         */
+        const val MIN_LAID_OUT_HEIGHT_DP = 8
 
         const val LOGIN_ACTIVITY = "com.doubao.murmur.tv.app.login.LoginActivity"
         const val MIC_PERMISSION_ACTIVITY = "com.doubao.murmur.tv.app.permission.MicPermissionActivity"

@@ -275,42 +275,55 @@ class DoubaoAsrEngine(
     private inner class Listener : WebSocketListener() {
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            if (closedByUs) {
-                webSocket.close(CLOSE_CODE, CLOSE_REASON)
-                return
-            }
-            socket = webSocket
-            connected = true
-            flushPending(webSocket)
-            eventSink.tryEmit(AsrEvent.Connected)
+            runCatching {
+                if (closedByUs) {
+                    webSocket.close(CLOSE_CODE, CLOSE_REASON)
+                } else {
+                    socket = webSocket
+                    connected = true
+                    flushPending(webSocket)
+                    eventSink.tryEmit(AsrEvent.Connected)
+                }
+            }.onFailure { eventSink.tryEmit(AsrEvent.Failed(AsrFailures.classifyThrowable(it))) }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            receivedAny = true
-            dispatch(AsrProtocol.parse(text))
+            runCatching {
+                receivedAny = true
+                dispatch(AsrProtocol.parse(text))
+            }.onFailure { eventSink.tryEmit(AsrEvent.Failed(AsrFailures.classifyThrowable(it))) }
         }
 
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-            receivedAny = true
-            dispatch(AsrProtocol.parse(bytes.utf8()))
+            runCatching {
+                receivedAny = true
+                dispatch(AsrProtocol.parse(bytes.utf8()))
+            }.onFailure { eventSink.tryEmit(AsrEvent.Failed(AsrFailures.classifyThrowable(it))) }
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            handleClose(webSocket)
-            webSocket.close(CLOSE_CODE, CLOSE_REASON)
+            runCatching {
+                handleClose(webSocket)
+                webSocket.close(CLOSE_CODE, CLOSE_REASON)
+            }.onFailure { eventSink.tryEmit(AsrEvent.Failed(AsrFailures.classifyThrowable(it))) }
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            handleClose(webSocket)
+            runCatching {
+                handleClose(webSocket)
+            }.onFailure { eventSink.tryEmit(AsrEvent.Failed(AsrFailures.classifyThrowable(it))) }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            if (socket === webSocket) {
-                connected = false
-                sessionStarted = false
-            }
-            if (closedByUs) return
-            failOnce(classifyFailure(response, t), t)
+            runCatching {
+                if (socket === webSocket) {
+                    connected = false
+                    sessionStarted = false
+                }
+                if (!closedByUs) {
+                    failOnce(classifyFailure(response, t), t)
+                }
+            }.onFailure { eventSink.tryEmit(AsrEvent.Failed(AsrFailures.classifyThrowable(it))) }
         }
 
         private fun handleClose(webSocket: WebSocket) {

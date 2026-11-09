@@ -12,6 +12,7 @@ import com.doubao.murmur.tv.audio.MicProbe
 import com.doubao.murmur.tv.audio.PcmRecorder
 import com.doubao.murmur.tv.auth.SessionRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -58,7 +59,34 @@ class ImeController(
     private val finalTimeoutMsProvider: () -> Long = { DEFAULT_FINAL_TIMEOUT_MS },
 ) {
 
-    private val scope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
+    /**
+     * Catches any exception that escapes a child coroutine of [scope].
+     *
+     * Event collectors (`collect`) and the state-update loops run in [scope]; without a handler
+     * an uncaught exception would reach the main thread's uncaught-exception handler and kill the
+     * IME process (seen by the user as a bind/unbind "freeze"). Degrade to a recoverable Idle
+     * state with the generic error instead. Only the failure *type* is logged, never the
+     * transcript or a credential. [reportUncaughtFailure] is a function (not an init-block
+     * reference) so it can safely touch [_state], which is declared below [scope].
+     */
+    private val scope = CoroutineScope(
+        Dispatchers.Main.immediate + SupervisorJob() +
+            CoroutineExceptionHandler { _, throwable ->
+                Log.w(TAG, "uncaught coroutine failure: ${throwable::class.java.simpleName}")
+                reportUncaughtFailure()
+            }
+    )
+
+    /** Keeps an uncaught failure from reaching the main-thread uncaught handler; see [scope]. */
+    private fun reportUncaughtFailure() {
+        _state.update {
+            it.copy(
+                state = ImeState.Idle,
+                level = 0f,
+                errorMessage = context.getString(R.string.ime_error_generic),
+            )
+        }
+    }
 
     /**
      * Separate scope for microphone teardown.
