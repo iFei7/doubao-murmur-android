@@ -209,7 +209,20 @@ jobs:
           gradle-version: '8.9'
 
       - name: 构建 Debug APK
-        run: gradle :app:assembleDebug
+        env:
+          # Kotlin's daemon occasionally dies with "Daemon compilation failed: null" on
+          # hosted runners; compiling in-process removes that flakiness.
+          GRADLE_OPTS: -Dkotlin.compiler.execution.strategy=in-process
+        run: |
+          if ! gradle :app:assembleDebug > /tmp/gradle-debug.log 2>&1; then
+            tail -n 25 /tmp/gradle-debug.log
+            grep -E "^e: |ERROR:|FAILURE:|What went wrong|Execution failed|> Task .*FAILED" \
+              /tmp/gradle-debug.log | tail -n 10 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit 1
+          fi
+          tail -n 5 /tmp/gradle-debug.log
 
       - name: 输出 APK 体积到 Step Summary
         run: |

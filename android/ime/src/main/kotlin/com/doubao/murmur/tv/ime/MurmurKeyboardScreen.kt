@@ -607,8 +607,13 @@ private fun HoldToTalkButton(
                 detectTapGestures(
                     onPress = {
                         startHold()
-                        tryAwaitRelease()
-                        endHold()
+                        try {
+                            tryAwaitRelease()
+                        } finally {
+                            // pointerInput can be cancelled (view detached, rotation, IME hidden).
+                            // Always close the hold so no latched session is left running.
+                            endHold()
+                        }
                     },
                 )
             },
