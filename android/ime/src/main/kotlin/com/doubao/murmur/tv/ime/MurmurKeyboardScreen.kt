@@ -13,6 +13,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -70,6 +71,7 @@ import com.doubao.murmur.tv.ui.component.TvStatusChip
 import com.doubao.murmur.tv.ui.component.VoiceLevelMeter
 import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
+import com.doubao.murmur.tv.ui.theme.TvDimens
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -84,6 +86,16 @@ private const val LONG_PRESS_THRESHOLD_MS = 400L
 
 /** Compact (phone portrait) screens keep a small edge margin; TVs use the overscan-safe inset. */
 private val COMPACT_EDGE_PADDING = 12.dp
+
+/**
+ * Width the TV three-column row needs to lay out without hitting Compose's
+ * `coerceIn(0, mainAxisMax - fixedSpace)` empty-range assertion: the two fixed columns
+ * (150 dp + 342 dp), the two 20 dp spacers, twice the overscan padding and a minimum visible
+ * width for the weighted transcript column. Derived from the actual row children instead of a
+ * hand-picked magic number, so it tracks any future token change.
+ */
+private val TV_ROW_MIN_WINDOW_WIDTH =
+    150.dp + 342.dp + 40.dp + TvDimens.overscanHorizontal * 2f + 100.dp
 
 /**
  * The entire keyboard. Pure UI: no service, no repository, no microphone — every side effect is
@@ -141,61 +153,70 @@ fun MurmurKeyboardScreen(
         runCatching { primaryFocus.requestFocus() }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MurmurColors.Background)
-            .padding(
-                start = if (compact) COMPACT_EDGE_PADDING else dimens.overscanHorizontal,
-                end = if (compact) COMPACT_EDGE_PADDING else dimens.overscanHorizontal,
-                top = 14.dp,
-                bottom = if (compact) COMPACT_EDGE_PADDING else dimens.overscanVertical,
-            ),
-    ) {
-        StatusHeader(state = state, compact = compact, onOpenSettings = onOpenSettings)
+    // Decides the layout *structure* from the window's real constraints, not only from the
+    // device-level smallest width: a sw∈[600,628) tablet in portrait would otherwise enter the
+    // TV three-column row whose fixed children (532 dp + 96 dp overscan) exceed the window and
+    // crash inside RowColumnMeasurePolicy's `coerceIn`. The window is screen-wide (an IME does
+    // not shrink with the host's split-screen pane), so this covers every real form factor.
+    // Compact stays true for all phones regardless, so phone behaviour is unchanged.
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val vertical = compact || maxWidth < TV_ROW_MIN_WINDOW_WIDTH
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MurmurColors.Background)
+                .padding(
+                    start = if (compact) COMPACT_EDGE_PADDING else dimens.overscanHorizontal,
+                    end = if (compact) COMPACT_EDGE_PADDING else dimens.overscanHorizontal,
+                    top = 14.dp,
+                    bottom = if (compact) COMPACT_EDGE_PADDING else dimens.overscanVertical,
+                ),
+        ) {
+            StatusHeader(state = state, compact = vertical, onOpenSettings = onOpenSettings)
 
-        Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(10.dp))
 
-        KeyboardBody(
-            state = state,
-            compact = compact,
-            primaryFocus = primaryFocus,
-            onMicDown = onMicDown,
-            onMicUp = onMicUp,
-            onCancel = onCancel,
-            onClear = onClear,
-            onDelete = onDelete,
-            onNewline = onNewline,
-            onHide = onHide,
-            onSwitchSystemIme = onSwitchSystemIme,
-            onRequestLogin = onRequestLogin,
-            onRequestMicPermission = onRequestMicPermission,
-        )
+            KeyboardBody(
+                state = state,
+                compact = vertical,
+                primaryFocus = primaryFocus,
+                onMicDown = onMicDown,
+                onMicUp = onMicUp,
+                onCancel = onCancel,
+                onClear = onClear,
+                onDelete = onDelete,
+                onNewline = onNewline,
+                onHide = onHide,
+                onSwitchSystemIme = onSwitchSystemIme,
+                onRequestLogin = onRequestLogin,
+                onRequestMicPermission = onRequestMicPermission,
+            )
 
-        Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(10.dp))
 
-        // Phones have no OK / SEARCH / MENU hardware keys: showing TV hints would be misleading,
-        // and four long Chinese strings would also exceed the compact row's available width.
-        val hints = when {
-            compact && state.isCapturing -> listOf(
-                stringResource(R.string.ime_hint_phone_tap_stop),
-            )
-            compact -> listOf(
-                stringResource(R.string.ime_hint_phone_hold),
-                stringResource(R.string.ime_hint_phone_tap_latch),
-            )
-            state.isCapturing -> listOf(
-                stringResource(R.string.ime_hint_release_to_finish),
-                stringResource(R.string.ime_hint_back_cancel),
-            )
-            else -> listOf(
-                stringResource(R.string.ime_hint_hold_to_talk),
-                stringResource(R.string.ime_hint_back_hide),
-                stringResource(R.string.ime_hint_search_toggle),
-                stringResource(R.string.ime_hint_menu_settings),
-            )
+            // Phones have no OK / SEARCH / MENU hardware keys: showing TV hints would be misleading,
+            // and four long Chinese strings would also exceed the compact row's available width.
+            val hints = when {
+                compact && state.isCapturing -> listOf(
+                    stringResource(R.string.ime_hint_phone_tap_stop),
+                )
+                compact -> listOf(
+                    stringResource(R.string.ime_hint_phone_hold),
+                    stringResource(R.string.ime_hint_phone_tap_latch),
+                )
+                state.isCapturing -> listOf(
+                    stringResource(R.string.ime_hint_release_to_finish),
+                    stringResource(R.string.ime_hint_back_cancel),
+                )
+                else -> listOf(
+                    stringResource(R.string.ime_hint_hold_to_talk),
+                    stringResource(R.string.ime_hint_back_hide),
+                    stringResource(R.string.ime_hint_search_toggle),
+                    stringResource(R.string.ime_hint_menu_settings),
+                )
+            }
+            KeyHintBar(hints = hints, modifier = Modifier.fillMaxWidth())
         }
-        KeyHintBar(hints = hints, modifier = Modifier.fillMaxWidth())
     }
 }
 

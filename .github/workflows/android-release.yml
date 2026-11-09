@@ -200,9 +200,11 @@ jobs:
             -PversionName="${VERSION_NAME}" \
             -PversionCode="${VERSION_CODE}" \
             -Pchannel=stable > /tmp/gradle-release.log 2>&1; then
-            tail -n 25 /tmp/gradle-release.log
-            grep -E "^e: |ERROR:|FAILURE:|What went wrong|Execution failed|> Task .*FAILED" \
-              /tmp/gradle-release.log | tail -n 10 | while IFS= read -r line; do
+            tail -n 40 /tmp/gradle-release.log
+            # Capture the failure description AND the lines after "What went wrong" /
+            # "Caused by", which carry the actual reason.
+            grep -E -A8 "^e: |ERROR:|FAILURE: Build failed|What went wrong|Caused by:|Execution failed|> Task .*FAILED" \
+              /tmp/gradle-release.log | tail -n 14 | while IFS= read -r line; do
               echo "::error::$line"
             done
             exit 1
