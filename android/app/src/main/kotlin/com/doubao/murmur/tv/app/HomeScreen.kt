@@ -1,6 +1,8 @@
 package com.doubao.murmur.tv.app
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -29,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -40,6 +44,7 @@ import com.doubao.murmur.tv.ui.component.TvActionButton
 import com.doubao.murmur.tv.ui.component.TvChipTone
 import com.doubao.murmur.tv.ui.component.TvFocusableSurface
 import com.doubao.murmur.tv.ui.component.TvStatusChip
+import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.TvDimens
 
@@ -97,23 +102,31 @@ fun HomeScreen(
     modifier: Modifier = Modifier,
 ) {
     var showAbout by remember { mutableStateOf(false) }
+    val dimens = LocalDimens.current
+    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MurmurColors.Background)
-            // 5% overscan safe area, see docs/tv-adaptation.md section 6.1.
-            .padding(TvDimens.overscanHorizontal, TvDimens.overscanVertical),
-    ) {
-        Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
+    if (compact) {
+        // Portrait phone: one scrolling column. The two TV columns stack, the 48 dp divider spacer
+        // is dropped, and safeDrawing keeps content clear of the translucent system bars.
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .background(MurmurColors.Background)
+                .safeDrawingPadding()
+                .padding(
+                    horizontal = dimens.overscanHorizontal,
+                    vertical = 16.dp,
+                )
+                .verticalScroll(rememberScrollState()),
+        ) {
             StatusColumn(
                 state = state,
                 onLogin = onLogin,
                 onMicPermission = onMicPermission,
                 onImeAction = onImeAction,
-                modifier = Modifier.fillMaxHeight().weight(1.35f),
+                modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(modifier = Modifier.width(TvDimens.keyGap * 4))
+            Spacer(modifier = Modifier.height(dimens.keyGap * 2))
             ActionColumn(
                 state = state,
                 onLogin = onLogin,
@@ -122,15 +135,53 @@ fun HomeScreen(
                 onDiagnostics = onDiagnostics,
                 onAbout = { showAbout = true },
                 onRefresh = onRefresh,
-                modifier = Modifier.fillMaxHeight().weight(1f),
+                modifier = Modifier.fillMaxWidth(),
+                compact = true,
             )
-        }
-        VersionFooter()
+            VersionFooter()
 
-        if (showAbout) {
-            AboutDialog(
-                onDismiss = { showAbout = false },
-            )
+            if (showAbout) {
+                AboutDialog(
+                    onDismiss = { showAbout = false },
+                )
+            }
+        }
+    } else {
+        // TV: the original non-scrolling two-column layout, unchanged (zero visual change).
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .background(MurmurColors.Background)
+                // 5% overscan safe area, see docs/tv-adaptation.md section 6.1.
+                .padding(TvDimens.overscanHorizontal, TvDimens.overscanVertical),
+        ) {
+            Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                StatusColumn(
+                    state = state,
+                    onLogin = onLogin,
+                    onMicPermission = onMicPermission,
+                    onImeAction = onImeAction,
+                    modifier = Modifier.fillMaxHeight().weight(1.35f),
+                )
+                Spacer(modifier = Modifier.width(TvDimens.keyGap * 4))
+                ActionColumn(
+                    state = state,
+                    onLogin = onLogin,
+                    onMicPermission = onMicPermission,
+                    onImeAction = onImeAction,
+                    onDiagnostics = onDiagnostics,
+                    onAbout = { showAbout = true },
+                    onRefresh = onRefresh,
+                    modifier = Modifier.fillMaxHeight().weight(1f),
+                )
+            }
+            VersionFooter()
+
+            if (showAbout) {
+                AboutDialog(
+                    onDismiss = { showAbout = false },
+                )
+            }
         }
     }
 }
@@ -284,6 +335,7 @@ private fun ActionColumn(
     onDiagnostics: () -> Unit,
     onAbout: () -> Unit,
     onRefresh: () -> Unit,
+    compact: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
@@ -301,7 +353,13 @@ private fun ActionColumn(
         ActionEntry(stringResource(R.string.main_action_about), onAbout)
         ActionEntry(stringResource(R.string.action_refresh), onRefresh)
 
-        Spacer(modifier = Modifier.weight(1f))
+        // On a scrolling phone column there is no bounded remaining height for weight(1f), so the
+        // bottom-pinned hint becomes a fixed gap there. TV keeps weight(1f) exactly as before.
+        if (compact) {
+            Spacer(modifier = Modifier.height(LocalDimens.current.keyGap))
+        } else {
+            Spacer(modifier = Modifier.weight(1f))
+        }
 
         // Boxes without a keyboard settings screen are common; surfacing the two adb lines here is
         // often faster than talking a user through a hidden OEM menu.

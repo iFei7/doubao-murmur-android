@@ -21,15 +21,15 @@ import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
-import com.doubao.murmur.tv.ui.theme.TvDimens
 
 /**
  * Icon + label action button, sized for a D-pad.
  *
  * Design notes:
- * - Minimum height is [TvDimens.touchTargetMin] (64 dp), not the 48 dp phone minimum: the viewer
- *   aims with a 4-way rocker from 3 m away, so a small target is a usability bug, not a nit.
+ * - Minimum height is the active `touchTargetMin` token: 64 dp on TV (D-pad from 3 m), 48 dp on a
+ *   phone. A small D-pad target is a usability bug on the sofa, not a nit.
  * - [selected] does not change the focus treatment (that is owned by
  *   [TvFocusableSurface]); it only tints the inner pill, so "which commit mode is active" stays
  *   readable while the focus ring moves elsewhere.
@@ -47,18 +47,19 @@ fun TvActionButton(
     contentDescription: String? = null,
     containerColor: Color = MurmurColors.Surface,
 ) {
+    val dimens = LocalDimens.current
     TvFocusableSurface(
         onClick = onClick,
-        modifier = modifier.heightIn(min = TvDimens.touchTargetMin),
+        modifier = modifier.heightIn(min = dimens.touchTargetMin),
         enabled = enabled,
-        shape = RoundedCornerShape(TvDimens.cornerSmall),
+        shape = RoundedCornerShape(dimens.cornerSmall),
         contentDescription = contentDescription,
         containerColor = containerColor,
     ) {
         Row(
             modifier = Modifier
                 .padding(4.dp)
-                .clip(RoundedCornerShape(TvDimens.cornerSmall))
+                .clip(RoundedCornerShape(dimens.cornerSmall))
                 .background(
                     if (selected) MurmurColors.Accent.copy(alpha = 0.28f) else Color.Transparent,
                 )

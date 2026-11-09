@@ -12,8 +12,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
-import com.doubao.murmur.tv.ui.theme.TvDimens
 
 /**
  * Bottom strip of key hints ("长按 OK 说话 · BACK 收起 · SEARCH 切换录音").
@@ -32,9 +32,10 @@ fun KeyHintBar(
     modifier: Modifier = Modifier,
 ) {
     if (hints.isEmpty()) return
+    val dimens = LocalDimens.current
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(TvDimens.cornerSmall))
+            .clip(RoundedCornerShape(dimens.cornerSmall))
             .background(MurmurColors.Surface.copy(alpha = 0.7f))
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,

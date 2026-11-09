@@ -31,6 +31,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.Lifecycle
@@ -45,9 +46,9 @@ import com.doubao.murmur.tv.ime.R
 import com.doubao.murmur.tv.ui.component.TvActionButton
 import com.doubao.murmur.tv.ui.component.TvChipTone
 import com.doubao.murmur.tv.ui.component.TvStatusChip
+import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
-import com.doubao.murmur.tv.ui.theme.TvDimens
 import java.util.Locale
 import kotlinx.coroutines.launch
 
@@ -89,6 +90,8 @@ private fun ImeSettingsScreen(
     lifecycleOwner: LifecycleOwner,
     onBack: () -> Unit,
 ) {
+    val dimens = LocalDimens.current
+    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
     var composingEnabled by remember { mutableStateOf(preferences.composingEnabled) }
     var timeoutMs by remember { mutableStateOf(preferences.finalTimeoutMs) }
     var loggedIn by remember { mutableStateOf<Boolean?>(null) }
@@ -103,21 +106,15 @@ private fun ImeSettingsScreen(
         modifier = Modifier
             .fillMaxWidth()
             .padding(
-                start = TvDimens.overscanHorizontal,
-                end = TvDimens.overscanHorizontal,
-                top = TvDimens.overscanVertical,
-                bottom = TvDimens.overscanVertical,
+                start = dimens.overscanHorizontal,
+                end = dimens.overscanHorizontal,
+                top = dimens.overscanVertical,
+                bottom = dimens.overscanVertical,
             )
             .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(TvDimens.keyGap),
+        verticalArrangement = Arrangement.spacedBy(dimens.keyGap),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = stringResource(R.string.ime_settings_title),
-                style = MaterialTheme.typography.headlineSmall,
-                color = MurmurColors.OnBackground,
-            )
-            Spacer(Modifier.width(TvDimens.keyGap))
+        val statusChips: @Composable () -> Unit = {
             when (loggedIn) {
                 true -> TvStatusChip(
                     text = stringResource(R.string.login_success),
@@ -136,19 +133,42 @@ private fun ImeSettingsScreen(
                 )
             }
         }
+        if (compact) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(dimens.keyGap),
+            ) {
+                Text(
+                    text = stringResource(R.string.ime_settings_title),
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MurmurColors.OnBackground,
+                )
+                statusChips()
+            }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = stringResource(R.string.ime_settings_title),
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MurmurColors.OnBackground,
+                )
+                Spacer(Modifier.width(dimens.keyGap))
+                statusChips()
+            }
+        }
 
         SectionTitle(stringResource(R.string.ime_settings_section_system))
-        SystemStatusSection(lifecycleOwner)
+        SystemStatusSection(lifecycleOwner, compact)
 
         SectionTitle(stringResource(R.string.ime_settings_section_commit))
-        Row(horizontalArrangement = Arrangement.spacedBy(TvDimens.keyGap)) {
+        AdaptiveActionRow(compact = compact) {
             TvActionButton(
                 text = stringResource(R.string.ime_settings_commit_composing),
                 onClick = {
                     composingEnabled = true
                     preferences.composingEnabled = true
                 },
-                modifier = Modifier.height(TvDimens.touchTargetMin),
+                modifier = Modifier.height(dimens.touchTargetMin),
                 selected = composingEnabled,
             )
             TvActionButton(
@@ -157,14 +177,14 @@ private fun ImeSettingsScreen(
                     composingEnabled = false
                     preferences.composingEnabled = false
                 },
-                modifier = Modifier.height(TvDimens.touchTargetMin),
+                modifier = Modifier.height(dimens.touchTargetMin),
                 selected = !composingEnabled,
             )
         }
         HintText(stringResource(R.string.ime_settings_commit_hint))
 
         SectionTitle(stringResource(R.string.ime_settings_section_timeout))
-        Row(horizontalArrangement = Arrangement.spacedBy(TvDimens.keyGap)) {
+        AdaptiveActionRow(compact = compact) {
             ImePreferences.FINAL_TIMEOUT_OPTIONS_MS.forEach { optionMs ->
                 TvActionButton(
                     text = stringResource(
@@ -175,7 +195,7 @@ private fun ImeSettingsScreen(
                         timeoutMs = optionMs
                         preferences.finalTimeoutMs = optionMs
                     },
-                    modifier = Modifier.height(TvDimens.touchTargetMin),
+                    modifier = Modifier.height(dimens.touchTargetMin),
                     selected = timeoutMs == optionMs,
                 )
             }
@@ -185,7 +205,7 @@ private fun ImeSettingsScreen(
         SectionTitle(stringResource(R.string.ime_settings_section_privacy))
         HintText(stringResource(R.string.ime_settings_privacy_text))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(TvDimens.keyGap)) {
+        AdaptiveActionRow(compact = compact) {
             TvActionButton(
                 text = stringResource(R.string.ime_settings_action_sign_out),
                 onClick = {
@@ -195,16 +215,44 @@ private fun ImeSettingsScreen(
                         signOutDone = true
                     }
                 },
-                modifier = Modifier.height(TvDimens.touchTargetMin),
+                modifier = Modifier.height(dimens.touchTargetMin),
                 icon = Icons.Filled.Logout,
                 enabled = loggedIn == true,
             )
             TvActionButton(
                 text = stringResource(R.string.action_back),
                 onClick = onBack,
-                modifier = Modifier.height(TvDimens.touchTargetMin),
+                modifier = Modifier.height(dimens.touchTargetMin),
                 icon = Icons.Filled.KeyboardArrowLeft,
             )
+        }
+    }
+}
+
+/**
+ * Horizontal button/chip group that stacks vertically on a compact phone.
+ *
+ * A plain `Row` of `TvActionButton`s overflows a 360 dp screen: each button has a minimum width
+ * and the row has no weight child, so the accumulated non-weight width can exceed the available
+ * width and trip the empty-range crash in `RowColumnMeasurePolicy`. A vertical `Column` has a
+ * vertical main axis and cannot hit that width constraint; TV keeps the original `Row` verbatim.
+ */
+@Composable
+private fun AdaptiveActionRow(
+    compact: Boolean,
+    content: @Composable () -> Unit,
+) {
+    val dimens = LocalDimens.current
+    if (compact) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(dimens.keyGap),
+        ) {
+            content()
+        }
+    } else {
+        Row(horizontalArrangement = Arrangement.spacedBy(dimens.keyGap)) {
+            content()
         }
     }
 }
@@ -246,11 +294,12 @@ private fun HintText(text: String) {
  * system settings screen or from the input-method picker.
  */
 @Composable
-private fun SystemStatusSection(lifecycleOwner: LifecycleOwner) {
+private fun SystemStatusSection(lifecycleOwner: LifecycleOwner, compact: Boolean) {
+    val dimens = LocalDimens.current
     val system = rememberImeSystemStatus(lifecycleOwner)
     val context = LocalContext.current
 
-    Row(horizontalArrangement = Arrangement.spacedBy(TvDimens.keyGap)) {
+    AdaptiveActionRow(compact = compact) {
         TvStatusChip(
             text = stringResource(
                 if (system.enabled) {
@@ -276,19 +325,19 @@ private fun SystemStatusSection(lifecycleOwner: LifecycleOwner) {
     // Only the missing step is offered: a dead "already done" button would just be another
     // focusable stop the viewer has to walk past.
     if (!system.enabled || !system.selected) {
-        Row(horizontalArrangement = Arrangement.spacedBy(TvDimens.keyGap)) {
+        AdaptiveActionRow(compact = compact) {
             if (!system.enabled) {
                 TvActionButton(
                     text = stringResource(R.string.ime_settings_action_enable_system),
                     onClick = { openSystemImeSettings(context) },
-                    modifier = Modifier.height(TvDimens.touchTargetMin),
+                    modifier = Modifier.height(dimens.touchTargetMin),
                 )
             }
             if (!system.selected) {
                 TvActionButton(
                     text = stringResource(R.string.ime_settings_action_pick_ime),
                     onClick = { showImePicker(context) },
-                    modifier = Modifier.height(TvDimens.touchTargetMin),
+                    modifier = Modifier.height(dimens.touchTargetMin),
                 )
             }
         }

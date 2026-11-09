@@ -18,12 +18,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.annotation.Keep
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -31,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -414,28 +417,38 @@ private fun LoginScreen(
     onWebViewReady: (WebView) -> Unit,
     onWebViewUnavailable: () -> Unit,
 ) {
+    // One APK adapts to portrait phones: below 600 dp stack the toolbar instead of placing a
+    // weight(1f) text column between two buttons (which overflows at 360 dp). safeDrawing keeps
+    // the toolbar clear of the translucent system bars the TV theme enables.
+    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(MurmurColors.Background),
+            .background(MurmurColors.Background)
+            .then(if (compact) Modifier.safeDrawingPadding() else Modifier),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 32.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TvActionButton(text = backLabel, onClick = onBack)
-            Spacer(modifier = Modifier.width(24.dp))
-            Column(modifier = Modifier.weight(1f)) {
+        if (compact) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    TvActionButton(text = backLabel, onClick = onBack)
+                    if (phase == LoginPhase.Expired) {
+                        TvActionButton(text = retryLabel, onClick = onRetry)
+                    }
+                }
                 Text(
                     text = phaseHint(phase),
                     color = MurmurColors.OnSurface,
                     fontSize = 16.sp,
                 )
                 if (phase == LoginPhase.WebViewUnavailable) {
-                    // Concrete next step for the operator; a TV has no paste UI, so this is meant
-                    // to be read off the screen.
+                    // Concrete next step for the operator; a phone has a paste UI, but the adb
+                    // command is still the fastest way to diagnose a missing WebView provider.
                     Text(
                         text = "adb shell dumpsys webviewupdate",
                         color = MurmurColors.OnSurfaceMuted,
@@ -444,10 +457,37 @@ private fun LoginScreen(
                     )
                 }
             }
-            if (phase == LoginPhase.Expired) {
-                // Only after the poller gave up, and never auto-hidden again.
-                Spacer(modifier = Modifier.width(16.dp))
-                TvActionButton(text = retryLabel, onClick = onRetry)
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 32.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TvActionButton(text = backLabel, onClick = onBack)
+                Spacer(modifier = Modifier.width(24.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = phaseHint(phase),
+                        color = MurmurColors.OnSurface,
+                        fontSize = 16.sp,
+                    )
+                    if (phase == LoginPhase.WebViewUnavailable) {
+                        // Concrete next step for the operator; a TV has no paste UI, so this is meant
+                        // to be read off the screen.
+                        Text(
+                            text = "adb shell dumpsys webviewupdate",
+                            color = MurmurColors.OnSurfaceMuted,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+                if (phase == LoginPhase.Expired) {
+                    // Only after the poller gave up, and never auto-hidden again.
+                    Spacer(modifier = Modifier.width(16.dp))
+                    TvActionButton(text = retryLabel, onClick = onRetry)
+                }
             }
         }
         AndroidView(

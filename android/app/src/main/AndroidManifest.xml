@@ -13,10 +13,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
-    <!-- TV first: Leanback launcher is mandatory, everything else is optional hardware. -->
+    <!--
+      TV first: keep the LEANBACK_LAUNCHER entry for TV channels, but declare the leanback feature
+      optional. required="true" makes Play filter the app out on phones, so one APK must not require
+      it to stay installable on a portrait phone.
+    -->
     <uses-feature
         android:name="android.software.leanback"
-        android:required="true" />
+        android:required="false" />
     <uses-feature
         android:name="android.hardware.touchscreen"
         android:required="false" />
@@ -47,8 +51,7 @@
         <activity
             android:name="com.doubao.murmur.tv.app.MainActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|uiMode"
-            android:exported="true"
-            android:screenOrientation="landscape">
+            android:exported="true">
             <!-- Leanback launcher entry point. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

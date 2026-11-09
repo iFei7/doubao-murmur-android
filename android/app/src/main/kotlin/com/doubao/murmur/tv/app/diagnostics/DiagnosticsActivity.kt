@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
@@ -25,6 +26,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -42,6 +44,7 @@ import com.doubao.murmur.tv.auth.SessionRepository
 import com.doubao.murmur.tv.audio.MicPermission
 import com.doubao.murmur.tv.audio.MicProbe
 import com.doubao.murmur.tv.ui.component.TvActionButton
+import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
 import com.doubao.murmur.tv.ui.theme.TvDimens
@@ -300,32 +303,66 @@ private fun DiagnosticsScreen(
     onCopy: () -> Unit,
     onBack: () -> Unit,
 ) {
+    // One APK adapts to portrait phones: below 600 dp stack the three toolbar buttons (a single
+    // Row with the title overflows at 360 dp) and use compact, system-bar-safe padding. TV keeps
+    // the original overscan and pinned Row untouched.
+    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
+    val dimens = LocalDimens.current
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MurmurColors.Background)
-            .padding(TvDimens.overscanHorizontal, TvDimens.overscanVertical),
+            .then(if (compact) Modifier.safeDrawingPadding() else Modifier)
+            .padding(
+                horizontal = if (compact) dimens.overscanHorizontal else TvDimens.overscanHorizontal,
+                vertical = if (compact) 16.dp else TvDimens.overscanVertical,
+            ),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            TvActionButton(text = stringResource(R.string.action_back), onClick = onBack)
-            TvActionButton(
-                text = stringResource(R.string.diagnostics_action_run),
-                onClick = onRunNetworkTest,
-            )
-            TvActionButton(
-                text = stringResource(R.string.diagnostics_action_copy),
-                onClick = onCopy,
-            )
-            Text(
-                text = stringResource(R.string.diagnostics_title),
-                color = MurmurColors.OnBackground,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+        if (compact) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                TvActionButton(text = stringResource(R.string.action_back), onClick = onBack)
+                TvActionButton(
+                    text = stringResource(R.string.diagnostics_action_run),
+                    onClick = onRunNetworkTest,
+                )
+                TvActionButton(
+                    text = stringResource(R.string.diagnostics_action_copy),
+                    onClick = onCopy,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = stringResource(R.string.diagnostics_title),
+                    color = MurmurColors.OnBackground,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                TvActionButton(text = stringResource(R.string.action_back), onClick = onBack)
+                TvActionButton(
+                    text = stringResource(R.string.diagnostics_action_run),
+                    onClick = onRunNetworkTest,
+                )
+                TvActionButton(
+                    text = stringResource(R.string.diagnostics_action_copy),
+                    onClick = onCopy,
+                )
+                Text(
+                    text = stringResource(R.string.diagnostics_title),
+                    color = MurmurColors.OnBackground,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(16.dp))

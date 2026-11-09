@@ -54,6 +54,10 @@
     <string name="ime_hint_back_cancel">BACK to cancel</string>
     <string name="ime_hint_search_toggle">SEARCH to start or stop</string>
     <string name="ime_hint_menu_settings">MENU for settings</string>
+    <!-- Compact-phone touch hints (no OK / SEARCH / MENU hardware keys) -->
+    <string name="ime_hint_phone_hold">Hold to talk</string>
+    <string name="ime_hint_phone_tap_latch">Tap for hands-free</string>
+    <string name="ime_hint_phone_tap_stop">Tap to stop</string>
 
     <!-- Errors -->
     <string name="ime_error_generic">Voice input failed, please try again</string>

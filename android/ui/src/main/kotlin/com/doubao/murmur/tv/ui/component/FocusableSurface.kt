@@ -39,6 +39,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
+import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.TvDimens
 
@@ -84,10 +85,11 @@ fun TvFocusableSurface(
     focusedContainerColor: Color = MurmurColors.SurfaceFocused,
     content: @Composable BoxScope.() -> Unit,
 ) {
+    val dimens = LocalDimens.current
     var isFocused by remember { mutableStateOf(false) }
 
     val scale by animateFloatAsState(
-        targetValue = if (isFocused && enabled) TvDimens.focusScale else 1f,
+        targetValue = if (isFocused && enabled) dimens.focusScale else 1f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioNoBouncy,
             stiffness = Spring.StiffnessMediumLow,
@@ -95,7 +97,7 @@ fun TvFocusableSurface(
         label = "tvFocusScale",
     )
     val borderWidth by animateDpAsState(
-        targetValue = if (isFocused) TvDimens.focusBorder else 1.dp,
+        targetValue = if (isFocused) dimens.focusBorder else 1.dp,
         label = "tvFocusBorderWidth",
     )
 

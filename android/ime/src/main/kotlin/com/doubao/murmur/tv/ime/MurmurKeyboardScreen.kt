@@ -56,6 +56,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Icon
@@ -67,8 +68,8 @@ import com.doubao.murmur.tv.ui.component.TvActionButton
 import com.doubao.murmur.tv.ui.component.TvChipTone
 import com.doubao.murmur.tv.ui.component.TvStatusChip
 import com.doubao.murmur.tv.ui.component.VoiceLevelMeter
+import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
-import com.doubao.murmur.tv.ui.theme.TvDimens
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -81,21 +82,27 @@ import kotlinx.coroutines.launch
  */
 private const val LONG_PRESS_THRESHOLD_MS = 400L
 
+/** Compact (phone portrait) screens keep a small edge margin; TVs use the overscan-safe inset. */
+private val COMPACT_EDGE_PADDING = 12.dp
+
 /**
  * The entire keyboard. Pure UI: no service, no repository, no microphone — every side effect is
  * delegated to a callback so that this screen can be rendered in a preview or a screenshot test.
  *
- * ## Layout
- * ```
- * ┌ status chips ───────────────────────────────────────── [设置] ┐
- * │ ┌ transcript (3 lines, auto-scroll) ┐ ┌ talk ┐ ┌ 清空 换行 ┐ │
- * │ │                                  │ │  ◉   │ │ 删除 收起 │ │
- * │ │                                  │ │ ▁▃▅▇  │ │ 系统键盘 ─┤ │
- * │ └──────────────────────────────────┘ └──────┘ └───────────┘ │
- * └ 长按 OK 说话 · BACK 收起 · SEARCH 开始/结束 ──────────────────┘
- * ```
- * The panel is bottom-anchored and about half the screen tall: a TV host app keeps its content in
- * the upper two thirds, so a heavier keyboard would cover the very thing the user is typing into.
+ * ## Two form factors
+ * - **TV (>= 600 dp smallest width):** the original three-column row — transcript (weight),
+ *   primary control (150 dp), action grid (342 dp). Values come from [LocalDimens] which resolves
+ *   to the TV token set; visual output is unchanged.
+ * - **Phone portrait (< 600 dp):** a vertical [Column]. This is not cosmetic. The TV row has
+ *   532 dp of non-weighted, fixed-width children; on a 360 dp screen the padded row only has
+ *   264 dp available, and `RowColumnMeasurePolicyKt.measure` calls
+ *   `totalSize.coerceIn(0, mainAxisMax - fixedSpace)`, whose empty range throws
+ *   `IllegalArgumentException: Cannot coerce value to an empty range`. Every row in the compact
+ *   branch therefore satisfies `fixedSpace <= mainAxisMax`: no hard-coded wide children, and
+ *   weighted children always live in a `fillMaxWidth()` parent.
+ *
+ * Sizing tokens are read from [LocalDimens], injected by `MurmurTvTheme`; the same composable
+ * renders with phone tokens on a handset and TV tokens on a television.
  *
  * ## Focus
  * - Default focus is the primary control (talk / sign in / grant microphone). It is the only thing
@@ -122,6 +129,8 @@ fun MurmurKeyboardScreen(
     onRequestMicPermission: () -> Unit,
 ) {
     val primaryFocus = remember { FocusRequester() }
+    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
+    val dimens = LocalDimens.current
 
     // Re-assert focus on the primary control whenever the primary control or the action grid
     // changes shape (talk <-> sign in <-> grant microphone, and 清空 <-> 取消 while recording).
@@ -137,31 +146,94 @@ fun MurmurKeyboardScreen(
             .fillMaxWidth()
             .background(MurmurColors.Background)
             .padding(
-                start = TvDimens.overscanHorizontal,
-                end = TvDimens.overscanHorizontal,
+                start = if (compact) COMPACT_EDGE_PADDING else dimens.overscanHorizontal,
+                end = if (compact) COMPACT_EDGE_PADDING else dimens.overscanHorizontal,
                 top = 14.dp,
-                bottom = TvDimens.overscanVertical,
+                bottom = if (compact) COMPACT_EDGE_PADDING else dimens.overscanVertical,
             ),
     ) {
-        StatusHeader(state = state, onOpenSettings = onOpenSettings)
+        StatusHeader(state = state, compact = compact, onOpenSettings = onOpenSettings)
 
         Spacer(Modifier.height(10.dp))
 
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                TranscriptPreview(
-                    text = state.preview,
-                    placeholder = stringResource(R.string.ime_preview_placeholder),
-                    isListening = state.isListening,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                ErrorLine(state.errorMessage)
-            }
+        KeyboardBody(
+            state = state,
+            compact = compact,
+            primaryFocus = primaryFocus,
+            onMicDown = onMicDown,
+            onMicUp = onMicUp,
+            onCancel = onCancel,
+            onClear = onClear,
+            onDelete = onDelete,
+            onNewline = onNewline,
+            onHide = onHide,
+            onSwitchSystemIme = onSwitchSystemIme,
+            onRequestLogin = onRequestLogin,
+            onRequestMicPermission = onRequestMicPermission,
+        )
 
-            Spacer(Modifier.width(20.dp))
+        Spacer(Modifier.height(10.dp))
 
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(150.dp)) {
-                PrimaryControl(
+        // Phones have no OK / SEARCH / MENU hardware keys: showing TV hints would be misleading,
+        // and four long Chinese strings would also exceed the compact row's available width.
+        val hints = when {
+            compact && state.isCapturing -> listOf(
+                stringResource(R.string.ime_hint_phone_tap_stop),
+            )
+            compact -> listOf(
+                stringResource(R.string.ime_hint_phone_hold),
+                stringResource(R.string.ime_hint_phone_tap_latch),
+            )
+            state.isCapturing -> listOf(
+                stringResource(R.string.ime_hint_release_to_finish),
+                stringResource(R.string.ime_hint_back_cancel),
+            )
+            else -> listOf(
+                stringResource(R.string.ime_hint_hold_to_talk),
+                stringResource(R.string.ime_hint_back_hide),
+                stringResource(R.string.ime_hint_search_toggle),
+                stringResource(R.string.ime_hint_menu_settings),
+            )
+        }
+        KeyHintBar(hints = hints, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+/**
+ * Lays out the transcript, primary control and action grid.
+ *
+ * The compact branch is a vertical [Column] with no fixed-width children, so no row can ever
+ * produce a negative remaining space for `coerceIn`. The TV branch is the original three-column
+ * [Row] with its 150 dp / 342 dp columns, which is safe because a TV has far more than 628 dp.
+ */
+@Composable
+private fun KeyboardBody(
+    state: ImeUiState,
+    compact: Boolean,
+    primaryFocus: FocusRequester,
+    onMicDown: () -> Unit,
+    onMicUp: () -> Unit,
+    onCancel: () -> Unit,
+    onClear: () -> Unit,
+    onDelete: () -> Unit,
+    onNewline: () -> Unit,
+    onHide: () -> Unit,
+    onSwitchSystemIme: () -> Unit,
+    onRequestLogin: () -> Unit,
+    onRequestMicPermission: () -> Unit,
+) {
+    if (compact) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(COMPACT_EDGE_PADDING),
+        ) {
+            TranscriptBlock(state = state, modifier = Modifier.fillMaxWidth())
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PrimaryBlock(
                     state = state,
                     focusRequester = primaryFocus,
                     onMicDown = onMicDown,
@@ -169,12 +241,32 @@ fun MurmurKeyboardScreen(
                     onRequestLogin = onRequestLogin,
                     onRequestMicPermission = onRequestMicPermission,
                 )
-                Spacer(Modifier.height(8.dp))
-                VoiceLevelMeter(level = state.level, active = state.isListening)
             }
-
+            ActionGrid(
+                state = state,
+                modifier = Modifier.fillMaxWidth(),
+                onCancel = onCancel,
+                onClear = onClear,
+                onDelete = onDelete,
+                onNewline = onNewline,
+                onHide = onHide,
+                onSwitchSystemIme = onSwitchSystemIme,
+            )
+        }
+    } else {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TranscriptBlock(state = state, modifier = Modifier.weight(1f))
             Spacer(Modifier.width(20.dp))
-
+            PrimaryBlock(
+                state = state,
+                focusRequester = primaryFocus,
+                modifier = Modifier.width(150.dp),
+                onMicDown = onMicDown,
+                onMicUp = onMicUp,
+                onRequestLogin = onRequestLogin,
+                onRequestMicPermission = onRequestMicPermission,
+            )
+            Spacer(Modifier.width(20.dp))
             ActionGrid(
                 state = state,
                 onCancel = onCancel,
@@ -185,34 +277,96 @@ fun MurmurKeyboardScreen(
                 onSwitchSystemIme = onSwitchSystemIme,
             )
         }
-
-        Spacer(Modifier.height(10.dp))
-
-        // Hint wording follows the state: while recording, "how to start" is useless information
-        // and "how to stop" is the only thing that matters.
-        val hints = if (state.isCapturing) {
-            listOf(
-                stringResource(R.string.ime_hint_release_to_finish),
-                stringResource(R.string.ime_hint_back_cancel),
-            )
-        } else {
-            listOf(
-                stringResource(R.string.ime_hint_hold_to_talk),
-                stringResource(R.string.ime_hint_back_hide),
-                stringResource(R.string.ime_hint_search_toggle),
-                stringResource(R.string.ime_hint_menu_settings),
-            )
-        }
-        KeyHintBar(hints = hints)
     }
 }
 
 @Composable
-private fun StatusHeader(state: ImeUiState, onOpenSettings: () -> Unit) {
+private fun TranscriptBlock(state: ImeUiState, modifier: Modifier = Modifier) {
+    Column(modifier = modifier) {
+        TranscriptPreview(
+            text = state.preview,
+            placeholder = stringResource(R.string.ime_preview_placeholder),
+            isListening = state.isListening,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        ErrorLine(state.errorMessage)
+    }
+}
+
+@Composable
+private fun PrimaryBlock(
+    state: ImeUiState,
+    focusRequester: FocusRequester,
+    modifier: Modifier = Modifier,
+    onMicDown: () -> Unit,
+    onMicUp: () -> Unit,
+    onRequestLogin: () -> Unit,
+    onRequestMicPermission: () -> Unit,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = modifier) {
+        PrimaryControl(
+            state = state,
+            focusRequester = focusRequester,
+            onMicDown = onMicDown,
+            onMicUp = onMicUp,
+            onRequestLogin = onRequestLogin,
+            onRequestMicPermission = onRequestMicPermission,
+        )
+        Spacer(Modifier.height(8.dp))
+        VoiceLevelMeter(level = state.level, active = state.isListening)
+    }
+}
+
+/**
+ * Compact header is a [Column]: on a 360 dp screen a [Row] of several localised status chips plus
+ * the settings button can exceed the available width and trigger the same empty-range assertion
+ * as the main keyboard row. Vertical stacking keeps every chip readable and the button reachable.
+ */
+@Composable
+private fun StatusHeader(state: ImeUiState, compact: Boolean, onOpenSettings: () -> Unit) {
+    val dimens = LocalDimens.current
+    if (compact) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (state.statusChecked) {
+                TvStatusChip(
+                    text = if (state.loggedIn) {
+                        stringResource(R.string.login_success)
+                    } else {
+                        stringResource(R.string.ime_status_not_signed_in)
+                    },
+                    tone = if (state.loggedIn) TvChipTone.Neutral else TvChipTone.Warning,
+                )
+                if (!state.micGranted) {
+                    TvStatusChip(
+                        text = stringResource(R.string.ime_status_mic_denied),
+                        tone = TvChipTone.Warning,
+                    )
+                }
+            }
+            if (state.state !is ImeState.Idle) {
+                TvStatusChip(
+                    text = statusLabel(state),
+                    tone = if (state.isListening) TvChipTone.Active else TvChipTone.Neutral,
+                )
+            }
+            TvActionButton(
+                text = stringResource(R.string.ime_action_settings),
+                onClick = onOpenSettings,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(dimens.actionButtonHeight),
+                icon = Icons.Filled.Settings,
+            )
+        }
+        return
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(TvDimens.keyGap),
+        horizontalArrangement = Arrangement.spacedBy(dimens.keyGap),
     ) {
         if (state.statusChecked) {
             TvStatusChip(
@@ -242,7 +396,7 @@ private fun StatusHeader(state: ImeUiState, onOpenSettings: () -> Unit) {
         TvActionButton(
             text = stringResource(R.string.ime_action_settings),
             onClick = onOpenSettings,
-            modifier = Modifier.height(TvDimens.actionButtonHeight),
+            modifier = Modifier.height(dimens.actionButtonHeight),
             icon = Icons.Filled.Settings,
         )
     }
@@ -305,11 +459,12 @@ private fun PrimaryPill(
     onClick: () -> Unit,
     focusRequester: FocusRequester,
 ) {
+    val dimens = LocalDimens.current
     TvActionButton(
         text = label,
         onClick = onClick,
         modifier = Modifier
-            .height(TvDimens.touchTargetMin)
+            .height(dimens.touchTargetMin)
             .focusRequester(focusRequester),
         icon = icon,
         containerColor = MurmurColors.Accent,
@@ -319,7 +474,7 @@ private fun PrimaryPill(
 /**
  * Push-to-talk button.
  *
- * Interaction model (identical for the remote and for a USB mouse):
+ * Interaction model (identical for the remote, a mouse and a touchscreen):
  * - **Hold >= 400 ms** → talks while held, finishes on release. This is the primary path and the
  *   only one that works on every remote, because `KEYCODE_VOICE_ASSIST` is consumed by the system
  *   and never reaches an IME (see [DoubaoVoiceInputMethodService]).
@@ -328,6 +483,8 @@ private fun PrimaryPill(
  *
  * The delayed start cannot live in the key handler alone: `KeyEvent.repeatCount` is unreliable
  * across TV ROMs, so a coroutine armed on KeyDown and cancelled on KeyUp is used instead.
+ * Touch uses the same [startHold]/[endHold] pair so a phone tap cannot both begin and end a
+ * session inside one gesture.
  */
 @Composable
 private fun HoldToTalkButton(
@@ -336,6 +493,7 @@ private fun HoldToTalkButton(
     onMicDown: () -> Unit,
     onMicUp: () -> Unit,
 ) {
+    val dimens = LocalDimens.current
     var isFocused by remember { mutableStateOf(false) }
     var holding by remember { mutableStateOf(false) }
     var longPressStarted by remember { mutableStateOf(false) }
@@ -374,7 +532,7 @@ private fun HoldToTalkButton(
     }
 
     val scale by animateFloatAsState(
-        targetValue = if (isFocused) TvDimens.focusScale else 1f,
+        targetValue = if (isFocused) dimens.focusScale else 1f,
         animationSpec = spring(),
         label = "talkButtonScale",
     )
@@ -388,14 +546,20 @@ private fun HoldToTalkButton(
 
     Box(
         modifier = Modifier
-            .size(TvDimens.micButtonSize)
+            .size(dimens.micButtonSize)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
             }
             .then(
                 if (isFocused) {
-                    Modifier.shadow(24.dp, CircleShape, clip = false, ambientColor = MurmurColors.Focus, spotColor = MurmurColors.Focus)
+                    Modifier.shadow(
+                        24.dp,
+                        CircleShape,
+                        clip = false,
+                        ambientColor = MurmurColors.Focus,
+                        spotColor = MurmurColors.Focus,
+                    )
                 } else {
                     Modifier
                 },
@@ -409,7 +573,7 @@ private fun HoldToTalkButton(
                 },
             )
             .border(
-                width = if (isFocused) TvDimens.focusBorder else 1.dp,
+                width = if (isFocused) dimens.focusBorder else 1.dp,
                 color = when {
                     isFocused -> MurmurColors.Focus
                     state.isListening -> MurmurColors.Listening.copy(alpha = recordingAlpha)
@@ -438,12 +602,13 @@ private fun HoldToTalkButton(
             }
             .focusable()
             .pointerInput(Unit) {
-                // Mouse / touchscreen: hold to talk, release to finish.
+                // Mouse / touchscreen: share the remote's 400 ms threshold and latch semantics.
+                // Do not add an onTap callback here as well — both would fire for one gesture.
                 detectTapGestures(
                     onPress = {
-                        onMicDown()
+                        startHold()
                         tryAwaitRelease()
-                        onMicUp()
+                        endHold()
                     },
                 )
             },
@@ -461,6 +626,8 @@ private fun HoldToTalkButton(
 @Composable
 private fun ActionGrid(
     state: ImeUiState,
+    // TV keeps the original 342 dp column; compact passes fillMaxWidth() so the grid adapts.
+    modifier: Modifier = Modifier.width(342.dp),
     onCancel: () -> Unit,
     onClear: () -> Unit,
     onDelete: () -> Unit,
@@ -468,11 +635,15 @@ private fun ActionGrid(
     onHide: () -> Unit,
     onSwitchSystemIme: () -> Unit,
 ) {
+    val dimens = LocalDimens.current
     Column(
-        modifier = Modifier.width(342.dp),
+        modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             // While capturing, "clear" is replaced by "cancel": the only useful destructive action
             // during an utterance is to throw it away, and it must be reachable without the remote
             // (the BACK key does the same thing).
@@ -482,7 +653,7 @@ private fun ActionGrid(
                     onClick = onCancel,
                     modifier = Modifier
                         .weight(1f)
-                        .height(TvDimens.actionButtonHeight),
+                        .height(dimens.actionButtonHeight),
                     icon = Icons.Filled.Clear,
                 )
             } else {
@@ -491,7 +662,7 @@ private fun ActionGrid(
                     onClick = onClear,
                     modifier = Modifier
                         .weight(1f)
-                        .height(TvDimens.actionButtonHeight),
+                        .height(dimens.actionButtonHeight),
                     icon = Icons.Filled.Clear,
                 )
             }
@@ -500,17 +671,20 @@ private fun ActionGrid(
                 onClick = onNewline,
                 modifier = Modifier
                     .weight(1f)
-                    .height(TvDimens.actionButtonHeight),
+                    .height(dimens.actionButtonHeight),
                 icon = Icons.Filled.KeyboardReturn,
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             TvActionButton(
                 text = stringResource(R.string.ime_action_delete),
                 onClick = onDelete,
                 modifier = Modifier
                     .weight(1f)
-                    .height(TvDimens.actionButtonHeight),
+                    .height(dimens.actionButtonHeight),
                 icon = Icons.Filled.Backspace,
             )
             TvActionButton(
@@ -518,17 +692,17 @@ private fun ActionGrid(
                 onClick = onHide,
                 modifier = Modifier
                     .weight(1f)
-                    .height(TvDimens.actionButtonHeight),
+                    .height(dimens.actionButtonHeight),
                 icon = Icons.Filled.KeyboardArrowDown,
             )
         }
-        Row {
+        Row(modifier = Modifier.fillMaxWidth()) {
             TvActionButton(
                 text = stringResource(R.string.ime_key_fallback_system),
                 onClick = onSwitchSystemIme,
                 modifier = Modifier
                     .weight(1f)
-                    .height(TvDimens.actionButtonHeight),
+                    .height(dimens.actionButtonHeight),
                 icon = Icons.Filled.SwapHoriz,
             )
         }

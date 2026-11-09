@@ -33,8 +33,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
-import com.doubao.murmur.tv.ui.theme.TvDimens
 
 /**
  * The transcript card: shows what the recogniser currently believes it heard.
@@ -63,6 +63,7 @@ fun TranscriptPreview(
     isListening: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val dimens = LocalDimens.current
     val scrollState = rememberScrollState()
 
     LaunchedEffect(text) {
@@ -78,10 +79,10 @@ fun TranscriptPreview(
 
     Box(
         modifier = modifier
-            .height(TvDimens.transcriptHeight)
-            .clip(RoundedCornerShape(TvDimens.cornerLarge))
+            .height(dimens.transcriptHeight)
+            .clip(RoundedCornerShape(dimens.cornerLarge))
             .background(MurmurColors.SurfaceElevated)
-            .padding(horizontal = TvDimens.contentPadding, vertical = 14.dp)
+            .padding(horizontal = dimens.contentPadding, vertical = 14.dp)
             .semantics { liveRegion = LiveRegionMode.Polite },
     ) {
         if (text.isEmpty()) {

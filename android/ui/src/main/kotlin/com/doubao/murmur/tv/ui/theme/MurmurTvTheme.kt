@@ -1,7 +1,9 @@
 package com.doubao.murmur.tv.ui.theme
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -121,9 +123,15 @@ internal val MurmurTypography: Typography = Typography().copy(
  */
 @Composable
 fun MurmurTvTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = MurmurColorScheme,
-        typography = MurmurTypography,
-        content = content,
-    )
+    // One APK adapts to both form factors without a second material3 theme domain: below 600 dp of
+    // smallest width (a portrait phone) publish the compact token set, otherwise keep the original
+    // 10-foot values. The tv-material colour scheme and typography stay identical for both.
+    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
+    CompositionLocalProvider(LocalDimens provides if (compact) PhoneDimens else TvDimens) {
+        MaterialTheme(
+            colorScheme = MurmurColorScheme,
+            typography = MurmurTypography,
+            content = content,
+        )
+    }
 }

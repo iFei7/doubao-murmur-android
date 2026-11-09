@@ -78,6 +78,10 @@
     <string name="ime_hint_back_cancel">BACK 取消</string>
     <string name="ime_hint_search_toggle">SEARCH 开始/结束</string>
     <string name="ime_hint_menu_settings">MENU 设置</string>
+    <!-- 手机竖屏触摸提示（无 OK / SEARCH / MENU 实体键） -->
+    <string name="ime_hint_phone_hold">按住说话</string>
+    <string name="ime_hint_phone_tap_latch">轻点连说</string>
+    <string name="ime_hint_phone_tap_stop">轻点结束</string>
     <string name="ime_error_generic">语音输入失败，请重试</string>
     <string name="ime_error_not_signed_in">尚未登录豆包</string>
     <string name="ime_error_no_microphone">未检测到麦克风</string>
