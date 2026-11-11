@@ -40,6 +40,10 @@ dependencies {
 
     // Declared up front so pure JVM tests (URL / cookie-header parsing) need no build-file change.
     testImplementation(libs.junit4)
+    // Real org.json for the JVM: the android.jar stub throws on every call, so decodePayload()
+    // could not be exercised in a unit test without it. Test scope only - production keeps the
+    // platform implementation.
+    testImplementation(libs.org.json)
 }
 
 configure<DetektExtension> {

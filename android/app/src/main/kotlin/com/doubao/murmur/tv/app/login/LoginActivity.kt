@@ -15,6 +15,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.annotation.Keep
 import androidx.compose.foundation.background
@@ -49,6 +50,7 @@ import com.doubao.murmur.tv.ui.component.TvActionButton
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
 import kotlinx.coroutines.launch
+import org.json.JSONTokener
 
 /**
  * WebView host that harvests the doubao.com session so the ASR socket can be authenticated.
@@ -73,8 +75,14 @@ class LoginActivity : ComponentActivity() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** Guarded by [saveInFlight] so the page-finished timer and the JS bridge cannot race. */
-    private val saveCheck = Runnable { attemptSave() }
+    /**
+     * Guarded by [saveInFlight] so the page-finished timer and the JS bridge cannot race.
+     *
+     * The page-finished path only fires once the page itself says the user is signed in (see
+     * [checkLoginFlagThenSave]); the JS poller path ([LoginBridge]) is gated the same way by the
+     * script, so both roads into [attemptSave] carry the same proof.
+     */
+    private val saveCheck = Runnable { checkLoginFlagThenSave() }
 
     private var webView: WebView? = null
     private var saveInFlight = false
@@ -87,9 +95,9 @@ class LoginActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         sessionRepository = AppGraph.sessionRepository(this)
 
-        // Default outcome. Every way out of this screen except a successful extraction - BACK, the
-        // on-screen back button, HOME from the remote - therefore reports "not signed in" without
-        // anybody having to intercept the back key.
+        // Default outcome. Every way out of this screen except a successful extraction - BACK (once
+        // the WebView history is exhausted), the on-screen back button, HOME from the remote -
+        // therefore reports "not signed in".
         setResult(RESULT_CANCELED)
 
         setContent {
@@ -105,6 +113,25 @@ class LoginActivity : ComponentActivity() {
                 )
             }
         }
+
+        // PHONE: the back gesture/gesture bar first walks back through the WebView history (e.g.
+        // out of a wrong QR page, back to the entry page); only a history-less WebView closes the
+        // screen. TV: `ComponentActivity` routes KEYCODE_BACK through the same dispatcher, so the
+        // remote's BACK key now also navigates the page backwards before it closes the screen -
+        // the on-screen "back" button above still finishes the activity directly.
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    val view = webView
+                    if (view != null && view.canGoBack()) {
+                        view.goBack()
+                    } else {
+                        finish()
+                    }
+                }
+            },
+        )
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -143,8 +170,10 @@ class LoginActivity : ComponentActivity() {
 
                     // passport.doubao.com and the SSO hops still carry pre-login cookies, so
                     // reading the jar there would store a dead session. Only Doubao pages that are
-                    // not part of the login round trip are worth a check.
-                    if (url == null || !DoubaoLoginUrl.isLoginPage(url)) {
+                    // not part of the login round trip are worth a check - and even then the
+                    // extraction only runs once the page itself says the user signed in (see
+                    // [checkLoginFlagThenSave]).
+                    if (url == null || !DoubaoLoginUrl.isSessionCheckCandidate(url)) {
                         return
                     }
                     mainHandler.removeCallbacks(saveCheck)
@@ -167,6 +196,33 @@ class LoginActivity : ComponentActivity() {
             // a later attempt cannot touch it.
             webView = null
             markWebViewUnavailable()
+        }
+    }
+
+    /**
+     * Page-finished gate: Doubao writes `localStorage['flow_web_has_login'] = "true"` only after
+     * the user actually completed the login. A page that merely *loaded* also carries pre-login
+     * state (tea-cache ids, `ttwid`), so extracting credentials from it would either store a dead
+     * session or - before the cookie checks were tightened - fake a success. The flag query keeps
+     * that path closed; only a genuine "logged in" flag proceeds to [attemptSave].
+     *
+     * The JS poller ([LOGIN_POLL_JS]) reads the same flag and reaches the same verdict through
+     * [LoginBridge]; this function exists so the page-finished path cannot shortcut it.
+     */
+    private fun checkLoginFlagThenSave() {
+        val view = webView ?: return
+        if (signedIn || saveInFlight) {
+            return
+        }
+        view.evaluateJavascript(LOGIN_FLAG_QUERY_JS) { value ->
+            // The callback receives a JSON-encoded JavaScript value: the string `"true"` (quoted)
+            // when the flag is set, the JSON `null` otherwise. Unwrap the literal first.
+            val flag = value?.let { raw ->
+                runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull()
+            }
+            if (flag == "true") {
+                attemptSave()
+            }
         }
     }
 
@@ -401,6 +457,14 @@ private const val LOGIN_POLL_JS = """
 private const val POLL_RESET_JS = "try { window.__murmurLoginPoll = false; } catch (e) { }"
 
 /**
+ * One-shot read of the login flag used by the page-finished gate in [LoginActivity]. Returns the
+ * raw localStorage value (`"true"`, or JSON `null` when unset), so the Kotlin side can decide on
+ * the exact string instead of trusting the page load itself.
+ */
+private const val LOGIN_FLAG_QUERY_JS =
+    "try { localStorage.getItem('flow_web_has_login') } catch (e) { null }"
+
+/**
  * Full screen WebView plus a TV friendly hint bar.
  *
  * The hint bar is drawn on top of the page because the Doubao web login is designed for a phone:
@@ -429,28 +493,33 @@ private fun LoginScreen(
             .then(if (compact) Modifier.safeDrawingPadding() else Modifier),
     ) {
         if (compact) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            // Single row: buttons inline with the hint. The stacked block this replaced was tall
+            // enough to push the WebView (the actual login page) off a small phone viewport.
+            Column {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     TvActionButton(text = backLabel, onClick = onBack)
                     if (phase == LoginPhase.Expired) {
                         TvActionButton(text = retryLabel, onClick = onRetry)
                     }
+                    Text(
+                        text = phaseHint(phase),
+                        color = MurmurColors.OnSurface,
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                    )
                 }
-                Text(
-                    text = phaseHint(phase),
-                    color = MurmurColors.OnSurface,
-                    fontSize = 16.sp,
-                )
                 if (phase == LoginPhase.WebViewUnavailable) {
                     // Concrete next step for the operator; a phone has a paste UI, but the adb
                     // command is still the fastest way to diagnose a missing WebView provider.
                     Text(
                         text = "adb shell dumpsys webviewupdate",
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                         color = MurmurColors.OnSurfaceMuted,
                         fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace,

@@ -508,6 +508,10 @@ class ImeController(
             withContext(Dispatchers.IO) {
                 runCatching { sessionRepository.clear() }
                     .onFailure { Log.w(TAG, "clearing the rejected session failed", it) }
+                // The WebView cookie jar holds the same expired session; leaving it in place would
+                // let the next login "succeed" instantly off the stale cookies without the user
+                // signing in again.
+                sessionRepository.clearWebViewState()
             }
         }
 

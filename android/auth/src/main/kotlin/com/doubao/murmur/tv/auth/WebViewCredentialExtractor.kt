@@ -45,12 +45,14 @@ import kotlin.coroutines.resume
  * that is in fact logged in.
  *
  * ## Success criterion
- * `deviceId` and `webId` non-empty **and** at least one cookie present. The cookie set is not
- * filtered further because `CookieManager` on some ROMs answers before the cookie jar has finished
- * syncing and momentarily returns a partial set; requiring `sessionid` specifically would produce
- * spurious "not logged in" results. The consequence is that a stale `deviceId` alone produces
- * credentials that the server rejects later - the transport classifies that as
- * `AsrFailure.LoginExpired`, which sends the user back to the login screen anyway.
+ * `deviceId` and `webId` non-empty **and** the cookie set contains a session cookie -
+ * `sessionid`, `sid_tt` or `sessionid_ss` - with a non-empty value. The tea SDK cache
+ * (`deviceId` / `webId`) and pre-login cookies such as `ttwid` exist as soon as the page loads,
+ * so requiring *any* cookie would report success for a page the user has not logged in on yet.
+ * Requiring the `sessionid` family specifically cannot be relaxed on ROM grounds either: those
+ * cookies are httpOnly, and `CookieManager.getCookie(url)` returns httpOnly cookies too (unlike
+ * `document.cookie`), so "cookie jar not synced yet" would equally hide `sessionid` - and a
+ * device-id-only credential is rejected by the server anyway (`AsrFailure.LoginExpired`).
  */
 object WebViewCredentialExtractor {
 
@@ -63,6 +65,12 @@ object WebViewCredentialExtractor {
     private const val FIELD_TEA = "tea"
     private const val FIELD_LOGGED_IN = "loggedIn"
 
+    /**
+     * Cookie names that only exist once the user actually signed in. The login flow is judged on
+     * these; pre-login cookies (`ttwid` etc.) are not proof of a session.
+     */
+    internal val SESSION_COOKIE_NAMES: Set<String> = setOf("sessionid", "sid_tt", "sessionid_ss")
+
     private val SCRIPT = """
         (function(){try{return JSON.stringify({
           device: localStorage.getItem('samantha_web_web_id'),
@@ -74,9 +82,10 @@ object WebViewCredentialExtractor {
     /**
      * Reads the session material from [webView] and wraps it in [AsrCredentials].
      *
-     * Must be called after the page reached a Doubao page (see [DoubaoLoginUrl.isLoginPage]) so the
-     * login cookies are already in the jar. Never throws; every failure - including a WebView that
-     * never answers - is reported in the [Result].
+     * Must be called after the page reached a Doubao page (see
+     * [DoubaoLoginUrl.isSessionCheckCandidate]) so the login cookies are already in the jar.
+     * Never throws; every failure - including a WebView that never answers - is reported in the
+     * [Result].
      */
     suspend fun extract(webView: WebView): Result<AsrCredentials> = withContext(Dispatchers.Main) {
         try {
@@ -103,14 +112,16 @@ object WebViewCredentialExtractor {
             val deviceId = fieldOf(parseObject(deviceRaw), FIELD_WEB_ID)
                 ?: fieldOf(teaCache, FIELD_USER_UNIQUE_ID)
                 ?: webId
-            val cookies = parseCookies(readCookieHeader())
+            val cookieHeader = readCookieHeader()
+            val cookies = parseCookies(cookieHeader)
 
-            if (deviceId == null || webId == null || cookies.isEmpty()) {
+            if (deviceId == null || webId == null || !hasSessionCookie(cookies)) {
                 val loggedIn = snapshot.optString(FIELD_LOGGED_IN, "")
                 return@withContext Result.failure(
                     IllegalStateException(
                         "not logged in (deviceId=${presence(deviceId)}, webId=${presence(webId)}, " +
-                            "cookies=${cookies.size}, flow_web_has_login=$loggedIn)",
+                            "cookies=${cookies.size}, sessionCookie=${hasSessionCookie(cookies)}, " +
+                            "flow_web_has_login=$loggedIn)",
                     ),
                 )
             }
@@ -178,7 +189,7 @@ object WebViewCredentialExtractor {
      * `sid_guard=abc|1234|5184000|Mon, 01 Jun 2026` or base64 payloads with `=` padding would
      * otherwise be truncated and the server would reject the session.
      */
-    private fun parseCookies(header: String?): Map<String, String> {
+    internal fun parseCookies(header: String?): Map<String, String> {
         if (header.isNullOrEmpty()) return emptyMap()
         val cookies = LinkedHashMap<String, String>()
         for (entry in header.split(";")) {
@@ -192,6 +203,14 @@ object WebViewCredentialExtractor {
         }
         return cookies
     }
+
+    /**
+     * True when [cookies] contains at least one [SESSION_COOKIE_NAMES] entry with a non-empty
+     * value. A present-but-empty `sessionid` (doubao.com clears the value during logout) counts
+     * as "not logged in", matching what the server would decide anyway.
+     */
+    internal fun hasSessionCookie(cookies: Map<String, String>): Boolean =
+        SESSION_COOKIE_NAMES.any { name -> !cookies[name].isNullOrEmpty() }
 
     private fun presence(value: String?): String = if (value == null) "missing" else "ok"
 }

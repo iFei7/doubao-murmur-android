@@ -1,5 +1,6 @@
 package com.doubao.murmur.tv.auth
 
+import android.webkit.CookieManager
 import android.webkit.WebView
 import com.doubao.murmur.tv.asr.AsrCredentials
 
@@ -37,6 +38,29 @@ class SessionRepository(private val store: CredentialStore) {
 
     /** Forgets the session; called on logout and after the server reports an expired login. */
     suspend fun clear() = store.clear()
+
+    /**
+     * Clears the **global** WebView cookie jar, in addition to [clear].
+     *
+     * The encrypted store and the cookie jar are two copies of the same session: wiping only the
+     * store leaves the old cookies inside `CookieManager`, so the very next login attempt finds a
+     * stale (pre-expiry) `sessionid` in the jar and the extractor reports success instantly - a
+     * re-login that never actually asked the user for anything. Logout and expiry therefore must
+     * clear both; the login screen itself must **not** call this before showing the page, because
+     * a WebView opened for re-authentication may legitimately rely on a still-valid session.
+     *
+     * Never throws: `CookieManager.getInstance()` fails on ROMs without a WebView provider, and a
+     * failed cleanup must not take down the IME that is merely reporting an expired session.
+     */
+    fun clearWebViewState() {
+        try {
+            val manager = CookieManager.getInstance()
+            manager.removeAllCookies(null)
+            manager.flush()
+        } catch (e: RuntimeException) {
+            // No WebView provider on this ROM; nothing else to clear.
+        }
+    }
 
     /** True when a session is stored and still decryptable. */
     suspend fun isLoggedIn(): Boolean = store.isLoggedIn()

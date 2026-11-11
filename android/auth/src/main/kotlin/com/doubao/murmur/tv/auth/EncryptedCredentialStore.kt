@@ -45,7 +45,7 @@ class EncryptedCredentialStore(private val context: Context) : CredentialStore {
         try {
             val payload = openPreferences().getString(KEY_PAYLOAD, null)
                 ?: return@withContext null
-            decode(payload)
+            decodePayload(payload)
         } catch (e: Exception) {
             // Unreadable or undecryptable: the blob can never become valid again.
             wipe()
@@ -85,21 +85,6 @@ class EncryptedCredentialStore(private val context: Context) : CredentialStore {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    private fun decode(payload: String): AsrCredentials? {
-        val root = JSONObject(payload)
-        val cookiesJson = root.optJSONObject(FIELD_COOKIES) ?: return null
-        val cookies = LinkedHashMap<String, String>(cookiesJson.length())
-        val names = cookiesJson.keys()
-        while (names.hasNext()) {
-            val name = names.next()
-            cookies[name] = cookiesJson.getString(name)
-        }
-        val deviceId = root.optString(FIELD_DEVICE_ID, "")
-        val webId = root.optString(FIELD_WEB_ID, "")
-        if (cookies.isEmpty() || deviceId.isEmpty() || webId.isEmpty()) return null
-        return AsrCredentials(cookies = cookies, deviceId = deviceId, webId = webId)
-    }
-
     /**
      * Deletes the stored blob through a plain (non-encrypted) handle on the same file.
      *
@@ -118,6 +103,7 @@ class EncryptedCredentialStore(private val context: Context) : CredentialStore {
     }
 
     companion object {
+
         /**
          * SharedPreferences file name, without the `.xml` suffix.
          * Must match `path="murmur_secure_credentials.xml"` in the backup exclusion rules.
@@ -128,5 +114,30 @@ class EncryptedCredentialStore(private val context: Context) : CredentialStore {
         private const val FIELD_COOKIES = "cookies"
         private const val FIELD_DEVICE_ID = "deviceId"
         private const val FIELD_WEB_ID = "webId"
+
+        /**
+         * Pure decode of the persisted blob; no Android dependencies, so unit tests can exercise
+         * the validation rules directly without instantiating `EncryptedSharedPreferences`.
+         *
+         * A cookie entry whose stored value is empty is dropped: an empty `sessionid` is not a
+         * session (doubao.com clears the value on logout), and keeping it would let a decoded blob
+         * pass a "cookies present" check while being worthless.
+         */
+        internal fun decodePayload(payload: String): AsrCredentials? {
+            val root = JSONObject(payload)
+            val cookiesJson = root.optJSONObject(FIELD_COOKIES) ?: return null
+            val cookies = LinkedHashMap<String, String>(cookiesJson.length())
+            val names = cookiesJson.keys()
+            while (names.hasNext()) {
+                val name = names.next()
+                val value = cookiesJson.optString(name, "")
+                if (value.isEmpty()) continue
+                cookies[name] = value
+            }
+            val deviceId = root.optString(FIELD_DEVICE_ID, "")
+            val webId = root.optString(FIELD_WEB_ID, "")
+            if (cookies.isEmpty() || deviceId.isEmpty() || webId.isEmpty()) return null
+            return AsrCredentials(cookies = cookies, deviceId = deviceId, webId = webId)
+        }
     }
 }
