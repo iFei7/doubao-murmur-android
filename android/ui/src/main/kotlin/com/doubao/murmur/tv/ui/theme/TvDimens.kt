@@ -2,7 +2,9 @@ package com.doubao.murmur.tv.ui.theme
 
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /**
  * Spacing and sizing tokens of the design system.
@@ -61,6 +63,25 @@ data class MurmurDimens(
 
     /** Padding inside cards and buttons. */
     val contentPadding: Dp,
+
+    /**
+     * Horizontal content edge for scrolling screens. On TV this equals [overscanHorizontal]
+     * (48 dp bezel margin); on a phone it is the standard 16 dp Material content margin - a phone
+     * has no overscan, so the 5% TV margin would read as an arbitrary wide gap.
+     */
+    val contentEdge: Dp,
+
+    /** Left/right padding inside the bottom key-hint bar. */
+    val hintBarPaddingHorizontal: Dp,
+
+    /** Top/bottom padding inside the bottom key-hint bar. */
+    val hintBarPaddingVertical: Dp,
+
+    /** Gap between two hints inside the bottom key-hint bar. */
+    val hintBarGap: Dp,
+
+    /** Font size of the key hints (legible from 3 m on TV, in-hand on a phone). */
+    val hintFontSize: TextUnit,
 )
 
 /**
@@ -83,6 +104,11 @@ val TvDimens = MurmurDimens(
     transcriptHeight = 132.dp,
     micButtonSize = 104.dp,
     contentPadding = 20.dp,
+    contentEdge = 48.dp,
+    hintBarPaddingHorizontal = 16.dp,
+    hintBarPaddingVertical = 10.dp,
+    hintBarGap = 20.dp,
+    hintFontSize = 18.sp,
 )
 
 /** Compact portrait-phone token set, published by [MurmurTvTheme] on screens below 600 dp. */
@@ -99,6 +125,11 @@ val PhoneDimens = MurmurDimens(
     transcriptHeight = 96.dp,
     micButtonSize = 72.dp,
     contentPadding = 12.dp,
+    contentEdge = 16.dp,
+    hintBarPaddingHorizontal = 12.dp,
+    hintBarPaddingVertical = 8.dp,
+    hintBarGap = 12.dp,
+    hintFontSize = 14.sp,
 )
 
 /**

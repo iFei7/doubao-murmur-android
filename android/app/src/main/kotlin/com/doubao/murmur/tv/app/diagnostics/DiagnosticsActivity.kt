@@ -315,7 +315,9 @@ private fun DiagnosticsScreen(
             .background(MurmurColors.Background)
             .then(if (compact) Modifier.safeDrawingPadding() else Modifier)
             .padding(
-                horizontal = if (compact) dimens.overscanHorizontal else TvDimens.overscanHorizontal,
+                // contentEdge: TV overscan (48 dp) / phone content margin (16 dp) - the compact
+                // branch previously used overscanHorizontal, which is 0 on a phone.
+                horizontal = dimens.contentEdge,
                 vertical = if (compact) 16.dp else TvDimens.overscanVertical,
             ),
     ) {

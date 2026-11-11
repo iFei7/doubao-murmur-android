@@ -8,6 +8,7 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,6 +66,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Draw behind the system bars so the compact (phone) branch's `safeDrawingPadding` gets
+        // real, live insets. On a TV there are no status/nav bars, so this is a no-op there.
+        // The theme's deprecated windowTranslucentStatus/Navigation flags are left untouched:
+        // they already draw behind the bars and compose fine with this API on API 29+.
+        enableEdgeToEdge()
         sessionRepository = AppGraph.sessionRepository(this)
 
         setContent {

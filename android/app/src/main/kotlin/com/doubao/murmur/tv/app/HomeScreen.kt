@@ -114,7 +114,8 @@ fun HomeScreen(
                 .background(MurmurColors.Background)
                 .safeDrawingPadding()
                 .padding(
-                    horizontal = dimens.overscanHorizontal,
+                    // contentEdge: TV overscan (48 dp) / phone content margin (16 dp).
+                    horizontal = dimens.contentEdge,
                     vertical = 16.dp,
                 )
                 .verticalScroll(rememberScrollState()),
@@ -124,6 +125,7 @@ fun HomeScreen(
                 onLogin = onLogin,
                 onMicPermission = onMicPermission,
                 onImeAction = onImeAction,
+                compact = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(modifier = Modifier.height(dimens.keyGap * 2))
@@ -161,6 +163,7 @@ fun HomeScreen(
                     onLogin = onLogin,
                     onMicPermission = onMicPermission,
                     onImeAction = onImeAction,
+                    compact = false,
                     modifier = Modifier.fillMaxHeight().weight(1.35f),
                 )
                 Spacer(modifier = Modifier.width(TvDimens.keyGap * 4))
@@ -192,13 +195,16 @@ private fun StatusColumn(
     onLogin: () -> Unit,
     onMicPermission: () -> Unit,
     onImeAction: () -> Unit,
+    compact: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val dimens = LocalDimens.current
     Column(modifier = modifier) {
+        // 38 sp is a 10-foot headline; a phone in hand reads comfortably at 28 sp.
         Text(
             text = stringResource(R.string.main_title),
             color = MurmurColors.OnBackground,
-            fontSize = 38.sp,
+            fontSize = if (compact) 28.sp else 38.sp,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.height(6.dp))
@@ -238,7 +244,7 @@ private fun StatusColumn(
             actionText = if (state.loggedIn) null else stringResource(R.string.main_action_login),
             onAction = onLogin,
         )
-        Spacer(modifier = Modifier.height(TvDimens.keyGap))
+        Spacer(modifier = Modifier.height(dimens.keyGap))
         StatusCard(
             done = state.micGranted && state.micAvailable,
             title = stringResource(R.string.mic_title),
@@ -250,7 +256,7 @@ private fun StatusColumn(
             actionText = if (state.micGranted) null else stringResource(R.string.mic_action_grant),
             onAction = onMicPermission,
         )
-        Spacer(modifier = Modifier.height(TvDimens.keyGap))
+        Spacer(modifier = Modifier.height(dimens.keyGap))
         StatusCard(
             done = state.imeEnabled && state.imeSelected,
             title = stringResource(R.string.enable_ime_title),
@@ -285,12 +291,13 @@ private fun StatusCard(
     actionText: String?,
     onAction: () -> Unit,
 ) {
+    val dimens = LocalDimens.current
     // A static, non-clickable card: tv-material's `Surface` in 1.0.0 takes a `SurfaceColors`
     // object (not a plain `color`), so a plain Box with a background shape is simpler and exact.
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MurmurColors.Surface, RoundedCornerShape(TvDimens.cornerLarge)),
+            .background(MurmurColors.Surface, RoundedCornerShape(dimens.cornerLarge)),
     ) {
         Row(
             modifier = Modifier
@@ -319,7 +326,7 @@ private fun StatusCard(
                 )
             }
             if (actionText != null) {
-                Spacer(modifier = Modifier.width(TvDimens.keyGap))
+                Spacer(modifier = Modifier.width(dimens.keyGap))
                 TvActionButton(text = actionText, onClick = onAction)
             }
         }
@@ -392,7 +399,7 @@ private fun ActionEntry(label: String, onClick: () -> Unit) {
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = TvDimens.keyGap / 2),
+            .padding(vertical = LocalDimens.current.keyGap / 2),
     ) {
         Row(
             modifier = Modifier

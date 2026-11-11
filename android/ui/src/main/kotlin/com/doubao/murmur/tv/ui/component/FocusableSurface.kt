@@ -32,6 +32,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
@@ -41,7 +42,6 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
-import com.doubao.murmur.tv.ui.theme.TvDimens
 
 /**
  * The one focusable building block of the TV design system.
@@ -78,7 +78,9 @@ fun TvFocusableSurface(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    shape: Shape = RoundedCornerShape(TvDimens.cornerLarge),
+    // `null` resolves to the current token set's large corner radius (TvDimens.cornerLarge on TV,
+    // PhoneDimens.cornerLarge on a phone). A `Shape` default could not read LocalDimens.
+    shape: Shape? = null,
     contentDescription: String? = null,
     stateDescription: String? = null,
     containerColor: Color = MurmurColors.Surface,
@@ -86,10 +88,22 @@ fun TvFocusableSurface(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val dimens = LocalDimens.current
+    // On a touchscreen the yellow focus ring and glow are a leak of the 10-foot focus language:
+    // a tap gives focus and paints the D-pad treatment over the whole phone UI. Compact screens
+    // keep the background highlight (the accessibility affordance) but drop ring/glow and get a
+    // pressed state instead. TV behaviour is byte-for-byte unchanged.
+    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
+    val resolvedShape = shape ?: RoundedCornerShape(dimens.cornerLarge)
     var isFocused by remember { mutableStateOf(false) }
+    var isPressed by remember { mutableStateOf(false) }
 
     val scale by animateFloatAsState(
-        targetValue = if (isFocused && enabled) dimens.focusScale else 1f,
+        targetValue = when {
+            isFocused && enabled -> dimens.focusScale
+            // Subtle press-down feedback for touch: TV keeps the focus scale only.
+            compact && isPressed -> 0.97f
+            else -> 1f
+        },
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioNoBouncy,
             stiffness = Spring.StiffnessMediumLow,
@@ -102,10 +116,10 @@ fun TvFocusableSurface(
     )
 
     // The glow is drawn behind the (clipped) container, so it is applied before `clip`.
-    val glow: Modifier = if (isFocused && enabled) {
+    val glow: Modifier = if (isFocused && enabled && !compact) {
         Modifier.shadow(
             elevation = 18.dp,
-            shape = shape,
+            shape = resolvedShape,
             clip = false,
             ambientColor = MurmurColors.Focus,
             spotColor = MurmurColors.Focus,
@@ -121,28 +135,38 @@ fun TvFocusableSurface(
                 scaleY = scale
             }
             .then(glow)
-            .clip(shape)
+            .clip(resolvedShape)
             .background(
-                if (!enabled) {
-                    containerColor.copy(alpha = 0.38f)
-                } else if (isFocused) {
-                    focusedContainerColor
-                } else {
-                    containerColor
+                when {
+                    !enabled -> containerColor.copy(alpha = 0.38f)
+                    isFocused || (compact && isPressed) -> focusedContainerColor
+                    else -> containerColor
                 },
             )
             .border(
                 width = borderWidth,
                 color = when {
                     !enabled -> MurmurColors.Outline.copy(alpha = 0.4f)
+                    // Touch path: no yellow focus ring, just the neutral outline.
+                    isFocused && compact -> MurmurColors.Outline
                     isFocused -> MurmurColors.Focus
                     else -> MurmurColors.Outline
                 },
-                shape = shape,
+                shape = resolvedShape,
             )
             .pointerInput(enabled) {
                 if (enabled) {
-                    detectTapGestures(onTap = { onClick() })
+                    detectTapGestures(
+                        onPress = {
+                            isPressed = true
+                            try {
+                                tryAwaitRelease()
+                            } finally {
+                                isPressed = false
+                            }
+                        },
+                        onTap = { onClick() },
+                    )
                 }
             }
             // Focus-related modifiers must precede `focusable()` in the chain: they attach

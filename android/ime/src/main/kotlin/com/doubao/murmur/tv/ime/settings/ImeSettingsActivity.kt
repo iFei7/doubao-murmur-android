@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -105,9 +106,13 @@ private fun ImeSettingsScreen(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            // A phone draws behind the translucent system bars; keep content clear of the status
+            // bar and the gesture strip. TV keeps the original overscan padding (and has no bars).
+            .then(if (compact) Modifier.safeDrawingPadding() else Modifier)
             .padding(
-                start = dimens.overscanHorizontal,
-                end = dimens.overscanHorizontal,
+                // contentEdge: TV overscan (48 dp) / phone content margin (16 dp).
+                start = dimens.contentEdge,
+                end = dimens.contentEdge,
                 top = dimens.overscanVertical,
                 bottom = dimens.overscanVertical,
             )

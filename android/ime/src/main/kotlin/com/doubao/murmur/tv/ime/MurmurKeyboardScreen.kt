@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -165,6 +166,12 @@ fun MurmurKeyboardScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MurmurColors.Background)
+                // Phone: keep KeyHintBar above the gesture navigation strip. The service's
+                // onComputeInsets only publishes inset *metadata* for the host - it never pads
+                // this window - and when the ROM sizes the window exactly to the keyboard the
+                // navigation-bar inset here is 0, so this is a no-op there. TV: unchanged (no
+                // nav bar; overscan bottom padding applies instead). Needs on-device verification.
+                .then(if (compact) Modifier.navigationBarsPadding() else Modifier)
                 .padding(
                     start = if (compact) COMPACT_EDGE_PADDING else dimens.overscanHorizontal,
                     end = if (compact) COMPACT_EDGE_PADDING else dimens.overscanHorizontal,

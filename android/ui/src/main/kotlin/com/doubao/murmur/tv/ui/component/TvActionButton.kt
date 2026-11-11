@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Icon
@@ -48,6 +49,10 @@ fun TvActionButton(
     containerColor: Color = MurmurColors.Surface,
 ) {
     val dimens = LocalDimens.current
+    // 88 dp min width is a D-pad target statement; on a 360 dp phone it only truncates labels,
+    // so the touch path relaxes it (weight/adaptive parents size the button instead) and allows
+    // a second line. TV keeps the original single-line 88 dp pill verbatim.
+    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
     TvFocusableSurface(
         onClick = onClick,
         modifier = modifier.heightIn(min = dimens.touchTargetMin),
@@ -64,7 +69,7 @@ fun TvActionButton(
                     if (selected) MurmurColors.Accent.copy(alpha = 0.28f) else Color.Transparent,
                 )
                 .padding(horizontal = 14.dp, vertical = 4.dp)
-                .widthIn(min = 88.dp),
+                .widthIn(min = if (compact) 64.dp else 88.dp),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -86,7 +91,7 @@ fun TvActionButton(
                 text = text,
                 style = MaterialTheme.typography.labelLarge,
                 color = tint,
-                maxLines = 1,
+                maxLines = if (compact) 2 else 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }

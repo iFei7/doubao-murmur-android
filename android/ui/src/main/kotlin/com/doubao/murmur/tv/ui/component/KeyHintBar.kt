@@ -9,7 +9,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.doubao.murmur.tv.ui.theme.LocalDimens
@@ -37,21 +36,24 @@ fun KeyHintBar(
         modifier = modifier
             .clip(RoundedCornerShape(dimens.cornerSmall))
             .background(MurmurColors.Surface.copy(alpha = 0.7f))
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(
+                horizontal = dimens.hintBarPaddingHorizontal,
+                vertical = dimens.hintBarPaddingVertical,
+            ),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(20.dp),
+        horizontalArrangement = Arrangement.spacedBy(dimens.hintBarGap),
     ) {
         hints.forEachIndexed { index, hint ->
             if (index > 0) {
                 Text(
                     text = "·",
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelLarge.copy(fontSize = dimens.hintFontSize),
                     color = MurmurColors.OnSurfaceMuted.copy(alpha = 0.6f),
                 )
             }
             Text(
                 text = hint,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelLarge.copy(fontSize = dimens.hintFontSize),
                 color = MurmurColors.OnSurfaceMuted,
             )
         }
