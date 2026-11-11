@@ -23,6 +23,8 @@ androidxSavedstate = "1.2.1"
 okhttp = "4.12.0"
 
 junit = "4.13.2"
+# Real org.json implementation for JVM unit tests: the android.jar stub throws on every call.
+orgJson = "20240303"
 androidxTestExtJunit = "1.2.1"
 androidxTestRunner = "1.6.2"
 espresso = "3.6.1"
@@ -68,6 +70,7 @@ kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serializa
 
 # Testing / benchmarking
 junit4 = { module = "junit:junit", version.ref = "junit" }
+json = { module = "org.json:json", version.ref = "orgJson" }
 androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestExtJunit" }
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTestRunner" }
 espresso-core = { module = "androidx.test.espresso:espresso-core", version.ref = "espresso" }
