@@ -102,6 +102,8 @@ adb shell ls -l /data/anr/ && adb pull /data/anr/ .
 4. **`smallestScreenWidthDp` 取值**：分屏 / 小窗 / 部分 TV ROM 下该值可能不等于预期，导致 Compact 判定偏差。
 5. **长按阈值手感**：400ms 是否偏长、是否与宿主的长按点击冲突。
 6. **30s 长会话**：点按锁定后切走宿主输入框、让 30s 守卫触发，确认 `commitFinal` 正常上屏且无竞态异常。
+7. **紧凑键盘总高度（可用性，非崩溃）**：Compact 分支把三栏改为纵向堆叠，粗算总高约 512–626 dp（状态头 + 转写卡 96 dp + 麦克风 72 dp + 动作网格 3 行 + 提示条 + 间距）。在 640 dp 高的手机竖屏上可能占去大半屏，盖住宿主输入框；`contentTopInsets = 0` 的设计是让宿主不 pan/resize，所以被盖住的输入框不会自动上移。真机请确认：① 输入框是否仍可见；② 键盘是否可上下滚动看到全部按钮。若确实遮挡，后续可把 Compact 根布局改为 `heightIn(max = <屏高 45%>)` + `verticalScroll`，或把动作网格折叠成 2 行。这是布局调优，不影响崩溃修复。
+8. **系统字体放大**：`KeyHintBar` 内的提示文本是 wrap content 且无 `weight`，把系统字体调到最大（或切换更长的语言）时，hint 行可能超出屏宽。真机请在「设置 → 显示 → 字体大小 = 最大」下复测一次键盘唤起；若出现 `Cannot coerce value to an empty range`，说明是 hint 行而非主布局，修法是给 hint 文本加 `weight(1f, fill = false)` 或按形态减少提示条数。
 
 ---
 
