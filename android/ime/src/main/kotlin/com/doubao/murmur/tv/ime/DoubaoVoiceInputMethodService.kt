@@ -2,6 +2,7 @@ package com.doubao.murmur.tv.ime
 
 import android.content.Intent
 import android.content.res.Resources
+import android.graphics.Rect
 import android.inputmethodservice.InputMethodService
 import android.inputmethodservice.InputMethodService.Insets
 import android.os.Build
@@ -183,76 +184,104 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
     override fun onEvaluateInputViewShown(): Boolean = true
 
     /**
-     * Tells the framework where the keyboard actually is.
+     * Tells the framework where the keyboard is and which part of it takes touches.
      *
      * - `contentTopInsets = 0`: "my content does not occlude the host's content". This is what
      *   keeps the host from resizing or panning; the keyboard behaves as a bottom overlay.
-     * - `visibleTopInsets`: top of the *visible* part, in window coordinates. It is 0 when the IME
-     *   window is exactly as tall as the keyboard, and equal to the keyboard's offset when a ROM
-     *   gives the window the whole screen. Computing it from the view's real position works for
-     *   both window layouts; hard-coding either 0 or the view height breaks on the other one.
-     * - The touchable region is derived from the same rectangle, **shrunk at the bottom by the
-     *   navigation-bar inset**: the panel renders `navigationBarsPadding` content inside a window
-     *   that extends behind the nav bar, and without the shrink the touchable region would cover
-     *   the gesture-navigation strip — the classic "keyboard is up and edge swipes are dead"
-     *   regression. The shrunk strip passes touches through to the system gesture zone.
+     * - The touchable rectangle is the panel's own rectangle in **IME-window coordinates**, minus
+     *   the gesture-navigation strip along its bottom edge. A touch outside that rectangle counts
+     *   as an "outside the keyboard" tap, which is exactly what dismisses the IME — so the
+     *   rectangle must never be *smaller* than the panel. An underestimated region turns every
+     *   tap on the panel into a dismiss (the device bug this method is written against), while an
+     *   overestimated one only swallows the gesture strip while the keyboard is up.
      *
-     * Until the container has a real layout we must NOT fall back to the framework defaults: the
-     * default `TOUCHABLE_INSETS_VISIBLE` lets the whole IME window swallow touches and keys, which
-     * is the "keyboard is up but nothing responds" symptom. The pre-attach placeholder measure
-     * reports only a 1 px height, so [MIN_LAID_OUT_HEIGHT_DP] is the threshold that separates that
-     * frame from a real layout:
-     * - **real layout**: positive width and a height above [MIN_LAID_OUT_HEIGHT_DP] - publish the
-     *   container's actual rectangle, bottom-inset by the nav bar;
-     * - **placeholder**: container missing, or width/height still 0 or the 1 px measure - publish
-     *   a conservative bottom strip (at most 1/3 of the screen).
+     * Three rules keep the estimate on the safe side of that trade-off:
+     * - the region's bottom edge is the **panel's** bottom edge, never a screen-derived offset:
+     *   [panelTouchableRegion] derives everything from the window (`decorView`) whose coordinate
+     *   space the region lives in, so a ROM that sizes the IME window differently cannot push the
+     *   rectangle outside it. A region that lands outside its own window is clipped away and
+     *   leaves the window with an empty touchable region — every tap then dismisses the keyboard;
+     * - the gesture strip is only cut when the panel can spare it: at least
+     *   [PANEL_CONTENT_HEIGHT_DP] of panel content (the 72 dp button row plus the panel's vertical
+     *   padding) always stays touchable, so a ROM reporting an oversized nav-bar inset (or a
+     *   window that does *not* extend behind the nav bar at all) cannot eat into the row;
+     * - when the panel has no usable geometry yet the **whole window** is declared touchable
+     *   ([Insets.TOUCHABLE_INSETS_FRAME]) instead of a guessed strip. The framework computes
+     *   insets right after [onCreateInputView], before the input view is attached — our container
+     *   answers that pre-attach measure with 1 px (see [ImeComposeContainer]) — and an IME window
+     *   hugs its input view, so the frame *is* the panel.
      */
     override fun onComputeInsets(outInsets: Insets) {
         super.onComputeInsets(outInsets)
         outInsets.contentTopInsets = 0
-        val metrics = resources.displayMetrics
-        val minLaidOutHeightPx = (MIN_LAID_OUT_HEIGHT_DP * metrics.density).toInt().coerceAtLeast(1)
-        val navBarBottomPx = navigationBarBottomInsetPx()
-        val container = inputContainer
-        if (container != null && container.width > 0 && container.height > minLaidOutHeightPx) {
-            val location = IntArray(2)
-            container.getLocationInWindow(location)
-            val top = location[1].coerceAtLeast(0)
-            val bottom = (top + container.height - navBarBottomPx).coerceAtLeast(top + 1)
-            outInsets.visibleTopInsets = top
+        val region = panelTouchableRegion()
+        if (region != null) {
+            outInsets.visibleTopInsets = region.top
             outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
-            outInsets.touchableRegion.set(location[0], top, location[0] + container.width, bottom)
+            outInsets.touchableRegion.set(region)
             Log.d(
                 TAG,
-                "onComputeInsets navBarBottomPx=$navBarBottomPx " +
-                    "region=[${location[0]},$top][${location[0] + container.width},$bottom]",
+                "onComputeInsets region=$region panelHeight=${inputContainer?.height} " +
+                    "window=${window?.window?.decorView?.width}x${window?.window?.decorView?.height}",
             )
         } else {
-            // Placeholder: the container is missing or still reports the 1 px pre-attach measure.
-            // Publish an explicit, conservative bottom strip rather than the framework default
-            // (which would cover the whole screen). Clamp to at most 1/3 of the screen so the
-            // region never covers the top area where the host's input lives.
-            // The strip is expressed in *window* coordinates, so the height reference is the
-            // IME window itself (decorView height) rather than the whole screen — a ROM that
-            // sizes the window differently would otherwise place the strip at the wrong offset.
-            val screenWidth = metrics.widthPixels
-            val screenHeight = window?.window?.decorView?.height?.takeIf { it > 0 }
-                ?: metrics.heightPixels
-            val height = minOf(
-                (PLACEHOLDER_KEYBOARD_HEIGHT_DP * metrics.density).toInt(),
-                screenHeight / 3,
-            ).coerceAtLeast(1)
-            val top = (screenHeight - height).coerceAtLeast(0)
-            val bottom = (screenHeight - navBarBottomPx).coerceAtLeast(top + 1)
-            outInsets.visibleTopInsets = top
-            outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
-            outInsets.touchableRegion.set(0, top, screenWidth, bottom)
+            // No panel geometry yet (pre-attach measure, or the window has not been laid out).
+            // The window frame is the only rectangle guaranteed to be inside the window and to
+            // cover whatever the panel will be; publishing nothing would let the platform fall
+            // back to TOUCHABLE_INSETS_VISIBLE, which is equivalent here.
+            outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_FRAME
             Log.d(
                 TAG,
-                "onComputeInsets(placeholder) navBarBottomPx=$navBarBottomPx " +
-                    "windowHeight=$screenHeight region=[0,$top][$screenWidth,$bottom]",
+                "onComputeInsets(frame) panelHeight=${inputContainer?.height} " +
+                    "window=${window?.window?.decorView?.width}x${window?.window?.decorView?.height}",
             )
         }
+    }
+
+    /**
+     * The panel's touchable rectangle in IME-window coordinates, or `null` when there is not
+     * enough information to place it.
+     *
+     * Height is the only dimension that survives the framework's pre-attach measure (the container
+     * answers that pass with 1 px, see [ImeComposeContainer.onMeasure]) once the panel has been
+     * laid out at least once, so it is the gate for "the panel has a real size". The top edge is
+     * the panel's real window position when the view is attached to a laid-out window; otherwise
+     * it falls back to the bottom-anchored assumption every IME window satisfies
+     * (`Gravity.BOTTOM`). `getLocationInWindow` on a detached view returns (0, 0), which would
+     * place the region above the panel instead of over it.
+     */
+    private fun panelTouchableRegion(): Rect? {
+        val container = inputContainer ?: return null
+        val decor = window?.window?.decorView ?: return null
+        val windowWidth = decor.width
+        val windowHeight = decor.height
+        if (windowWidth <= 0 || windowHeight <= 0) return null
+        if (container.width <= 0) return null
+
+        val density = resources.displayMetrics.density
+        val minLaidOutHeightPx = (MIN_LAID_OUT_HEIGHT_DP * density).toInt().coerceAtLeast(1)
+        val panelHeight = container.height
+        if (panelHeight <= minLaidOutHeightPx) return null
+
+        val top = if (container.isAttachedToWindow) {
+            val location = IntArray(2)
+            container.getLocationInWindow(location)
+            location[1].takeIf { it in 0 until windowHeight }
+        } else {
+            null
+        } ?: (windowHeight - panelHeight).coerceAtLeast(0)
+
+        // The panel is bottom-anchored, so its bottom edge is the window's bottom edge; clamp to
+        // the window so a stale panel height can never overshoot it.
+        val panelBottom = (top + panelHeight).coerceAtMost(windowHeight)
+        // Cut the gesture strip, but never more than the panel can spare: the button row and its
+        // padding stay touchable even when the reported inset is larger than the panel itself.
+        val minContentPx = (PANEL_CONTENT_HEIGHT_DP * density).toInt()
+        val maxCut = (panelHeight - minContentPx).coerceAtLeast(0)
+        val cut = navigationBarBottomInsetPx().coerceIn(0, maxCut)
+        val regionBottom = (panelBottom - cut).coerceAtLeast(top + 1)
+
+        return Rect(0, top, windowWidth, regionBottom)
     }
 
     /**
@@ -263,9 +292,10 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
      * navigation-bar height. A **positive** reported value is trusted as-is, but several ROMs
      * report `bottom = 0` for the IME window even with gesture navigation — in that case (and
      * when no insets object is available) we fall back to the platform `navigation_bar_height`
-     * dimension, then to a density-scaled 48 px floor. Overestimating is safe (a thin untouchable
-     * strip above the keyboard's bottom edge); underestimating makes the IME swallow the system
-     * back gesture, which is the bug this guard exists for.
+     * dimension, then to a density-scaled 48 px floor. Overestimating is harmless: the caller caps
+     * the cut at what the panel can spare ([PANEL_CONTENT_HEIGHT_DP]), so a too large value only
+     * shortens the cut and never reaches the button row. Underestimating makes the IME swallow the
+     * system back gesture, which is the bug this guard exists for.
      */
     @Suppress("DEPRECATION")
     private fun navigationBarBottomInsetPx(): Int {
@@ -397,11 +427,12 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
         const val TAG = "DoubaoVoiceIme"
 
         /**
-         * Conservative expected keyboard height (dp) for the touchable region published before the
-         * input container has been laid out. Clamped to at most 1/3 of the screen in
-         * [onComputeInsets] so the placeholder region never covers the whole window.
+         * Panel content (dp) that must always stay inside the touchable region: the 72 dp button
+         * row plus the panel's 10 dp vertical padding (both from [MurmurKeyboardScreen]). The
+         * gesture-strip cut in [panelTouchableRegion] is capped so it can never reach the row —
+         * an oversized nav-bar inset must not turn the buttons into "outside the keyboard" taps.
          */
-        const val PLACEHOLDER_KEYBOARD_HEIGHT_DP = 240
+        const val PANEL_CONTENT_HEIGHT_DP = 92
 
         /**
          * Minimum container height (dp) treated as a real layout. The pre-attach placeholder

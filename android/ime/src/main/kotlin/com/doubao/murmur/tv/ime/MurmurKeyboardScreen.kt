@@ -149,6 +149,12 @@ fun MurmurKeyboardScreen(
             .fillMaxWidth()
             .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
             .background(MurmurColors.Surface)
+            // Swallow taps that land on panel chrome (padding, the empty space above the row) so
+            // a touch inside the IME window is always consumed by the keyboard itself rather than
+            // being left for the ROM's outside-tap handling. Interactive children still win: the
+            // Main pointer pass runs child -> parent, so the mic's press/latch gesture and every
+            // IconButton consume the DOWN before this detector sees it.
+            .pointerInput(Unit) { detectTapGestures(onTap = {}) }
             .navigationBarsPadding()
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
