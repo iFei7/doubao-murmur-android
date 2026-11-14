@@ -239,57 +239,86 @@ private fun ImeSettingsScreen(
         }
         HintText(stringResource(R.string.ime_settings_timeout_hint))
 
-        // Only the missing step is offered: a dead "already done" row would just be noise.
+        // System status is *always* visible: hiding the rows once both checks pass reads as
+        // "the keyboard cannot tell whether it is enabled". The action cards below are the only
+        // conditional part — a dead "already done" row would just be noise.
         val system = rememberImeSystemStatus(lifecycleOwner)
-        if (!system.enabled || !system.selected) {
-            SectionTitle(stringResource(R.string.ime_settings_section_system))
-            if (!system.enabled) {
-                SettingsCard {
-                    Row(
-                        modifier = Modifier
-                            .clickable { openSystemImeSettings(context) }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = stringResource(R.string.ime_settings_action_enable_system),
-                                color = MurmurColors.Accent,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Medium,
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = stringResource(R.string.ime_settings_ime_disabled),
-                                color = MurmurColors.OnSurfaceMuted,
-                                fontSize = 12.sp,
-                            )
-                        }
+        SectionTitle(stringResource(R.string.ime_settings_section_system))
+        SettingsCard {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Text(
+                    text = stringResource(
+                        if (system.enabled) {
+                            R.string.ime_settings_ime_enabled
+                        } else {
+                            R.string.ime_settings_ime_disabled
+                        },
+                    ),
+                    color = MurmurColors.OnSurface,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = stringResource(
+                        if (system.selected) {
+                            R.string.ime_settings_ime_selected
+                        } else {
+                            R.string.ime_settings_ime_not_selected
+                        },
+                    ),
+                    color = MurmurColors.OnSurface,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+        if (!system.enabled) {
+            SettingsCard {
+                Row(
+                    modifier = Modifier
+                        .clickable { openSystemImeSettings(context) }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.ime_settings_action_enable_system),
+                            color = MurmurColors.Accent,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = stringResource(R.string.ime_settings_ime_disabled),
+                            color = MurmurColors.OnSurfaceMuted,
+                            fontSize = 12.sp,
+                        )
                     }
                 }
             }
-            if (!system.selected) {
-                SettingsCard {
-                    Row(
-                        modifier = Modifier
-                            .clickable { showImePicker(context) }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = stringResource(R.string.ime_settings_action_pick_ime),
-                                color = MurmurColors.Accent,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Medium,
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = stringResource(R.string.ime_settings_ime_not_selected),
-                                color = MurmurColors.OnSurfaceMuted,
-                                fontSize = 12.sp,
-                            )
-                        }
+        }
+        if (!system.selected) {
+            SettingsCard {
+                Row(
+                    modifier = Modifier
+                        .clickable { showImePicker(context) }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.ime_settings_action_pick_ime),
+                            color = MurmurColors.Accent,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = stringResource(R.string.ime_settings_ime_not_selected),
+                            color = MurmurColors.OnSurfaceMuted,
+                            fontSize = 12.sp,
+                        )
                     }
                 }
             }
@@ -412,14 +441,28 @@ private fun rememberImeSystemStatus(lifecycleOwner: LifecycleOwner): ImeSystemSt
 
 private fun readImeSystemStatus(context: Context): ImeSystemStatus {
     val self = ComponentName(context, DoubaoVoiceInputMethodService::class.java)
+
+    // Channel 1: Settings.Secure. Works on stock Android but is restricted/stale on some ROMs.
     val enabledList = runCatching {
         Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_INPUT_METHODS)
     }.getOrNull()
-    val enabled = enabledList
+    val settingsEnabled = enabledList
         .orEmpty()
         .split(':')
         .mapNotNull { ComponentName.unflattenFromString(it) }
         .any { it == self }
+
+    // Channel 2: InputMethodManager's own list (standard framework API, no new dependency).
+    // Authoritative where the Settings.Secure table cannot be read back reliably; a ROM that
+    // blocks either channel must not flip the status to "disabled" while the other one still
+    // sees the IME, so a channel failure only contributes "false" when both agree.
+    val managerEnabled = runCatching {
+        context.getSystemService(InputMethodManager::class.java)
+            ?.enabledInputMethodList
+            ?.any { ComponentName.unflattenFromString(it.id) == self }
+    }.getOrNull() == true
+
+    val enabled = settingsEnabled || managerEnabled
 
     val defaultId = runCatching {
         Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)

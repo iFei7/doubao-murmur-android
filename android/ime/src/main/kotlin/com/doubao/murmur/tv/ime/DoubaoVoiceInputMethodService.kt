@@ -1,6 +1,7 @@
 package com.doubao.murmur.tv.ime
 
 import android.content.Intent
+import android.content.res.Resources
 import android.inputmethodservice.InputMethodService
 import android.inputmethodservice.InputMethodService.Insets
 import android.os.Build
@@ -200,13 +201,22 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
             outInsets.visibleTopInsets = top
             outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
             outInsets.touchableRegion.set(location[0], top, location[0] + container.width, bottom)
+            Log.d(
+                TAG,
+                "onComputeInsets navBarBottomPx=$navBarBottomPx " +
+                    "region=[${location[0]},$top][${location[0] + container.width},$bottom]",
+            )
         } else {
             // Placeholder: the container is missing or still reports the 1 px pre-attach measure.
             // Publish an explicit, conservative bottom strip rather than the framework default
             // (which would cover the whole screen). Clamp to at most 1/3 of the screen so the
             // region never covers the top area where the host's input lives.
+            // The strip is expressed in *window* coordinates, so the height reference is the
+            // IME window itself (decorView height) rather than the whole screen — a ROM that
+            // sizes the window differently would otherwise place the strip at the wrong offset.
             val screenWidth = metrics.widthPixels
-            val screenHeight = metrics.heightPixels
+            val screenHeight = window?.window?.decorView?.height?.takeIf { it > 0 }
+                ?: metrics.heightPixels
             val height = minOf(
                 (PLACEHOLDER_KEYBOARD_HEIGHT_DP * metrics.density).toInt(),
                 screenHeight / 3,
@@ -216,6 +226,11 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
             outInsets.visibleTopInsets = top
             outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
             outInsets.touchableRegion.set(0, top, screenWidth, bottom)
+            Log.d(
+                TAG,
+                "onComputeInsets(placeholder) navBarBottomPx=$navBarBottomPx " +
+                    "windowHeight=$screenHeight region=[0,$top][$screenWidth,$bottom]",
+            )
         }
     }
 
@@ -224,20 +239,41 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
      *
      * `WindowInsets.Type.navigationBars()` needs API 30; API 23-29 fall back to the (deprecated
      * but accurate for this purpose) `systemWindowInsetBottom`, which on an IME window is the
-     * navigation-bar height. Before the window exists the value is unknown; the spec's 48 px
-     * floor keeps the gesture strip protected even then (minSdk is 23, so the guard is
-     * belt-and-braces).
+     * navigation-bar height. A **positive** reported value is trusted as-is, but several ROMs
+     * report `bottom = 0` for the IME window even with gesture navigation — in that case (and
+     * when no insets object is available) we fall back to the platform `navigation_bar_height`
+     * dimension, then to a density-scaled 48 px floor. Overestimating is safe (a thin untouchable
+     * strip above the keyboard's bottom edge); underestimating makes the IME swallow the system
+     * back gesture, which is the bug this guard exists for.
      */
     @Suppress("DEPRECATION")
     private fun navigationBarBottomInsetPx(): Int {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return FALLBACK_NAV_BAR_HEIGHT_PX
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return fallbackNavBarBottomInsetPx()
         val insets = window?.window?.decorView?.rootWindowInsets
-            ?: return FALLBACK_NAV_BAR_HEIGHT_PX
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            ?: return fallbackNavBarBottomInsetPx()
+        val reported = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             insets.getInsets(WindowInsets.Type.navigationBars()).bottom
         } else {
             insets.systemWindowInsetBottom
         }.coerceAtLeast(0)
+        return if (reported > 0) reported else fallbackNavBarBottomInsetPx()
+    }
+
+    /**
+     * Conservative gesture-strip height when the window reports nothing usable: the platform
+     * `navigation_bar_height` dimension first (it matches the actual ROM value, e.g. 24dp or
+     * 48dp), falling back to a density-scaled 48 px floor.
+     */
+    private fun fallbackNavBarBottomInsetPx(): Int {
+        val dimenId = runCatching {
+            Resources.getSystem().getIdentifier("navigation_bar_height", "dimen", "android")
+        }.getOrNull() ?: 0
+        if (dimenId > 0) {
+            val fromRes = runCatching { resources.getDimensionPixelSize(dimenId) }.getOrDefault(0)
+            if (fromRes > 0) return fromRes
+        }
+        return (FALLBACK_NAV_BAR_HEIGHT_DP * resources.displayMetrics.density).toInt()
+            .coerceAtLeast(1)
     }
 
     // ------------------------------------------------------------------ keys
@@ -353,10 +389,11 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
         const val MIN_LAID_OUT_HEIGHT_DP = 8
 
         /**
-         * Navigation-bar height (raw px, not dp) assumed when the IME window has no insets yet.
-         * Per the phone-panel spec's fallback for pre-inset situations.
+         * Navigation-bar height floor (dp) used when the IME window reports no usable inset
+         * (no insets object, or `bottom = 0` on ROMs that zero it out for IME windows). Applied
+         * as `48 * density` in [fallbackNavBarBottomInsetPx].
          */
-        const val FALLBACK_NAV_BAR_HEIGHT_PX = 48
+        const val FALLBACK_NAV_BAR_HEIGHT_DP = 48
 
         const val LOGIN_ACTIVITY = "com.doubao.murmur.tv.app.login.LoginActivity"
         const val MIC_PERMISSION_ACTIVITY = "com.doubao.murmur.tv.app.permission.MicPermissionActivity"
