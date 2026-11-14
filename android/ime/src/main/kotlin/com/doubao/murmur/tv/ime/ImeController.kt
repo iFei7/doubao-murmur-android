@@ -300,7 +300,12 @@ class ImeController(
     /** Refreshes the sign-in / microphone chips, e.g. right after the input view is shown. */
     fun refreshStatus() {
         scope.launch {
-            val loggedIn = runCatching { sessionRepository.isLoggedIn() }.getOrDefault(false)
+            // The first credential read unseals the Keystore master key, which can block for
+            // hundreds of milliseconds on low-end devices; the store dispatches to IO itself,
+            // but the wrap keeps that guarantee even if a future store implementation forgets.
+            val loggedIn = withContext(Dispatchers.IO) {
+                runCatching { sessionRepository.isLoggedIn() }.getOrDefault(false)
+            }
             val micGranted = MicPermission.hasRecordPermission(context)
             _state.update {
                 it.copy(loggedIn = loggedIn, micGranted = micGranted, statusChecked = true)
@@ -319,8 +324,12 @@ class ImeController(
     private suspend fun startInternal() {
         // `runCatching` must not swallow cancellation: if the service is destroyed mid-read we want
         // the coroutine to die quietly, not to report "not signed in" and open the login screen.
+        // The credential read hits EncryptedSharedPreferences (Keystore-backed); keep it off the
+        // main dispatcher even though the store already dispatches to IO internally.
         val credentials = try {
-            sessionRepository.current()
+            withContext(Dispatchers.IO) {
+                sessionRepository.current()
+            }
         } catch (t: CancellationException) {
             throw t
         } catch (t: Throwable) {

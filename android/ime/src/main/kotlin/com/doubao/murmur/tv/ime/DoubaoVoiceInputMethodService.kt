@@ -22,6 +22,11 @@ import com.doubao.murmur.tv.ime.settings.ImePreferences
 import com.doubao.murmur.tv.ime.settings.ImeSettingsActivity
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
 /**
@@ -56,6 +61,15 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
 
     /** Outer container returned from onCreateInputView; the authoritative rect for onComputeInsets. */
     private var inputContainer: ImeComposeContainer? = null
+
+    /**
+     * One-shot warm-up scope. `EncryptedSharedPreferences.create` unseals the Keystore master key
+     * and can block for hundreds of milliseconds on low-end devices; running it here, while the
+     * service binds, means the first `refreshStatus()` (input view shown) reads the cached
+     * preferences wrapper instead of freezing the IME window mid-animation. Cancelled in
+     * [onDestroy] so the read never touches the context after the service is gone.
+     */
+    private val warmUpScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     override fun onCreate() {
         super.onCreate()
@@ -92,6 +106,13 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
         // typing in a host app is exactly the kind of focus theft apps do not recover from.
         controller.onNeedLogin = { openAppActivity(LOGIN_ACTIVITY) }
         controller.onNeedMicPermission = { openAppActivity(MIC_PERMISSION_ACTIVITY) }
+
+        // Pre-unseal the Keystore-backed credential store off the main thread (see warmUpScope).
+        // Concurrent access with later main-thread reads is safe: the store's openPreferences()
+        // uses a synchronized double-check and caches the wrapper after the first open.
+        warmUpScope.launch {
+            runCatching { sessionRepository.isLoggedIn() }
+        }
     }
 
     // ------------------------------------------------------------------ view creation
@@ -315,6 +336,7 @@ class DoubaoVoiceInputMethodService : InputMethodService() {
 
     override fun onDestroy() {
         guarded("release") { controller.release() }
+        warmUpScope.cancel()
         composeView?.dispose()
         composeView?.disposeComposition()
         composeView = null
