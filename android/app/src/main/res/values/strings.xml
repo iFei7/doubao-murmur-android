@@ -51,6 +51,7 @@
     <string name="login_customtabs_note">Opens the login page with the system WebView. Finish signing in there, then return to this app - it closes automatically</string>
     <string name="login_customtabs_opened">Login page opened in the system browser. Finish signing in there, then return to this app</string>
     <string name="login_customtabs_open_failed">Could not open the system browser</string>
+    <string name="login_customtabs_no_session">The browser did not share the sign-in session. Sign in on this page instead, or return here and tap retry</string>
     <string name="login_hint_scan">Scan the code with your phone or type your account. This screen closes once you are signed in.</string>
 
     <!-- IME keyboard (owned by :ime, mirrored here so the app module keeps the single source of

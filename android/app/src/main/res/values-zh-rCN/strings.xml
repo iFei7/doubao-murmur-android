@@ -50,6 +50,7 @@
     <string name="login_customtabs_note">将用系统级 WebView 打开豆包登录页，登录后返回本应用即可自动完成</string>
     <string name="login_customtabs_opened">已在系统浏览器打开登录页，完成登录后返回本应用</string>
     <string name="login_customtabs_open_failed">无法打开系统浏览器</string>
+    <string name="login_customtabs_no_session">浏览器未共享登录会话，请改用本页登录，或返回本应用后点击重试</string>
     <string name="login_hint_scan">用手机扫码或输入账号完成登录，登录后本页自动关闭</string>
 
     <!-- 输入法键盘（归 :ime 所有，此处镜像一份，保持应用模块是文案的唯一来源；

@@ -70,6 +70,7 @@ import com.doubao.murmur.tv.app.R
 import com.doubao.murmur.tv.auth.DoubaoLoginUrl
 import com.doubao.murmur.tv.auth.SessionRepository
 import com.doubao.murmur.tv.auth.WebViewCredentialExtractor
+import com.doubao.murmur.tv.auth.parseBlankProbePayload
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
 import kotlinx.coroutines.Job
@@ -77,7 +78,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
-import org.json.JSONObject
 import org.json.JSONTokener
 import kotlin.coroutines.resume
 
@@ -183,6 +183,12 @@ class LoginActivity : ComponentActivity() {
 
     /** Set when the entry button was pressed while the binding was still connecting. */
     private var customTabLaunchPending = false
+
+    /**
+     * Set once a Custom Tab actually launched; consumed by [onResume] to reload the in-app login
+     * page once the user comes back (see there), then reset so a resume never reloads twice.
+     */
+    private var customTabLaunched = false
 
     /** Collection loop polling the cookie jar while the user is inside the Custom Tab. */
     private var customTabsCollectionJob: Job? = null
@@ -327,15 +333,12 @@ class LoginActivity : ComponentActivity() {
                 allowContentAccess = false
                 javaScriptCanOpenWindowsAutomatically = false
                 setGeolocationEnabled(false)
-                // Desktop UA on purpose. The upstream desktop client logs in through a desktop
-                // WebView (pywebview) with a non-mobile UA, and that flow is verified to work;
-                // v0.2.2 showed the default Android WebView UA (which carries the "Android; wv"
-                // tokens) reaching an HTTP-200 page that renders blank - evidence that Doubao
-                // serves a different, TV-unfriendly page when the UA looks like a mobile WebView.
-                // The v0.2.2 diagnostics (Page finished URL + JS console) verify the branch
-                // hypothesis either way; if the logs show Doubao rejecting the desktop UA
-                // (e.g. passport refusing it), revisit this line before falling back.
-                userAgentString = DESKTOP_LOGIN_UA
+                // Default (Android) UA on purpose. The v0.2.3 desktop-UA experiment is reverted:
+                // the v0.2.6 on-device panel showed the page's JS/DOM working under the desktop
+                // UA while the screen still stayed blank for the user, and the user's own mobile
+                // browser (Android 14, Mobile Chrome) is verified to open the Doubao mobile OAuth
+                // login page and sign in successfully - so stay on the verified mobile path.
+                // The desktop UA is the upstream desktop client's (pywebview) untested route.
             }
 
             // If the render self-test proved hardware compositing broken on this ROM (GPU
@@ -637,25 +640,28 @@ class LoginActivity : ComponentActivity() {
             // The callback runs on the UI thread; removing the timeout here marks the probe as
             // answered no matter how the payload decodes below.
             mainHandler.removeCallbacks(blankProbeTimeout)
-            val obj = runCatching {
-                JSONTokener(raw ?: "null").nextValue() as? JSONObject
-            }.getOrNull()
+            // The callback receives the JSON-encoded JavaScript return value: the object arrives
+            // as a quoted, escaped string literal, so the payload must be unwrapped twice (see
+            // parseBlankProbePayload). Until v0.2.6 the second layer was missed, which made every
+            // probe read "unreadable" and kept the blank-screen detection from ever firing.
+            val reading = parseBlankProbePayload(raw)
             // The callback running at all is itself the evidence: JS executed inside the
             // renderer. Only the decode quality varies.
-            diagBlankProbe = if (obj == null) {
-                BLANK_PROBE_RETURNED_UNREADABLE
+            diagBlankProbe = if (reading == null) {
+                "$BLANK_PROBE_RETURNED_UNREADABLE_PREFIX" +
+                    "${raw?.take(BLANK_PROBE_UNREADABLE_SNIPPET_LENGTH) ?: "null"})"
             } else {
                 "$BLANK_PROBE_RETURNED_PREFIX(" +
-                    "ready=${obj.optString("ready")},len=${obj.optInt("len", -1)})"
+                    "ready=${reading.ready},len=${reading.len})"
             }
-            if (obj == null) {
+            if (reading == null) {
                 Log.w(TAG, "Blank check: no readable result (raw=${raw?.take(80)})")
                 return@evaluateJavascript
             }
-            val summary = obj.toString()
+            val summary = "ready=${reading.ready},len=${reading.len},url=${reading.url}"
             Log.i(TAG, "Blank check: $summary")
-            val ready = obj.optString("ready")
-            val textLength = obj.optInt("len", -1)
+            val ready = reading.ready
+            val textLength = reading.len
             // No body text at all, or the document never finished - neither recovers on its own.
             if (textLength < BLANK_PAGE_TEXT_MIN_LENGTH || ready != "complete") {
                 onBlankPageDetected(summary)
@@ -872,6 +878,7 @@ class LoginActivity : ComponentActivity() {
         val intent = CustomTabsIntent.Builder(session).build()
         runCatching { intent.launchUrl(this, Uri.parse(DoubaoLoginUrl.LOGIN_URL)) }
             .onSuccess {
+                customTabLaunched = true
                 // Visible feedback that the route is live; the collection loop takes over from
                 // here. Only claimed while the screen is still in a quiet wait, so a load-error
                 // hint or a render self-test wording is never overwritten.
@@ -897,6 +904,13 @@ class LoginActivity : ComponentActivity() {
      * in-app route uses produces the credentials. A missing tea cache (page JS not done yet) is
      * retried on later ticks - the loop only stops on success or when its 10 min window ends.
      *
+     * Two diagnostics wrap the wait. Every tick logs the cookie *names* in the jar (values are
+     * dropped, presence-only) so a bug report shows whether the tab writes into this app's
+     * profile at all. And when not a single doubao cookie has appeared after
+     * [CUSTOMTABS_NO_COOKIE_TICKS], the browser clearly ignored the CustomTabsService-backed
+     * profile and kept the session in its own data directory - polling further cannot succeed,
+     * so the loop stops early with a hint instead of burning the full 10 min window.
+     *
      * Cookie handling is presence-only: the header itself is parsed and dropped, no cookie
      * value is ever logged or stored in state.
      */
@@ -905,7 +919,8 @@ class LoginActivity : ComponentActivity() {
             return
         }
         customTabsCollectionJob = lifecycleScope.launch {
-            repeat(CUSTOMTABS_COLLECT_MAX_TICKS) {
+            var anyCookieSeen = false
+            repeat(CUSTOMTABS_COLLECT_MAX_TICKS) { tick ->
                 delay(CUSTOMTABS_COLLECT_INTERVAL_MS)
                 if (signedIn) {
                     return@launch
@@ -913,6 +928,26 @@ class LoginActivity : ComponentActivity() {
                 val header = runCatching {
                     CookieManager.getInstance().getCookie(DoubaoLoginUrl.COOKIE_URL)
                 }.getOrNull()
+                // Presence-only: split the header into names, values are dropped.
+                val names = header
+                    ?.split(';')
+                    ?.map { it.trim().substringBefore('=') }
+                    ?.filter { it.isNotEmpty() }
+                    .orEmpty()
+                Log.i(TAG, "Custom Tabs route tick $tick: cookies=[${names.joinToString(", ")}]")
+                if (names.isNotEmpty()) {
+                    anyCookieSeen = true
+                } else if (tick + 1 >= CUSTOMTABS_NO_COOKIE_TICKS) {
+                    Log.w(
+                        TAG,
+                        "Custom Tabs route: no doubao cookie after 30 s; the browser did not " +
+                            "share the session",
+                    )
+                    if (phase == LoginPhase.Waiting && renderTestStage == null) {
+                        errorHint = getString(R.string.login_customtabs_no_session)
+                    }
+                    return@launch
+                }
                 val hasSession = header != null &&
                     WebViewCredentialExtractor.hasSessionCookieInHeader(header)
                 if (!hasSession || saveInFlight) {
@@ -1071,6 +1106,25 @@ class LoginActivity : ComponentActivity() {
         return clean.take(DIAG_URL_MAX_LENGTH)
     }
 
+    /**
+     * Coming back from a Custom Tab: if the browser honoured the CustomTabsService-backed
+     * profile, the login session now sits in this app's cookie jar and the in-app login page -
+     * once reloaded - sees it and flips to signed-in on its own (the page-finished gate and the
+     * JS poller then trigger the save). If the browser kept the session in its own data
+     * directory, the page simply reloads signed-out and the probe/panel report it as before.
+     *
+     * Fires once per Custom Tab visit ([customTabLaunched] is consumed here, so an immediate
+     * second resume - e.g. a permission prompt - never reloads the page twice).
+     */
+    override fun onResume() {
+        super.onResume()
+        if (customTabLaunched && !signedIn) {
+            customTabLaunched = false
+            Log.i(TAG, "Returned from Custom Tab; reloading the in-app login page")
+            retryLoad()
+        }
+    }
+
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
         if (customTabsBound) {
@@ -1104,15 +1158,6 @@ class LoginActivity : ComponentActivity() {
     companion object {
 
         private const val BRIDGE_NAME = "MurmurBridge"
-
-        /**
-         * Desktop Chrome UA for the login WebView. Real desktop Chrome 131 string: no
-         * Android/wv/Mobile tokens, so Doubao serves the same desktop login page the upstream
-         * desktop client (pywebview) is verified against. See the settings block in
-         * [attachWebView] for the reasoning and the fallback plan.
-         */
-        private const val DESKTOP_LOGIN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         private const val PAGE_SETTLE_DELAY_MS = 1_500L
 
@@ -1148,8 +1193,11 @@ class LoginActivity : ComponentActivity() {
         /** Prefix for a probe whose callback ran; carries readyState and body-text length. */
         private const val BLANK_PROBE_RETURNED_PREFIX = "returned"
 
-        /** Callback ran but the payload could not be decoded as a JSON object. */
-        private const val BLANK_PROBE_RETURNED_UNREADABLE = "returned(unreadable)"
+        /** Prefix for a callback that ran but whose payload could not be decoded. */
+        private const val BLANK_PROBE_RETURNED_UNREADABLE_PREFIX = "returned(unreadable:"
+
+        /** How much of an undecodable callback payload the panel shows for diagnosis. */
+        private const val BLANK_PROBE_UNREADABLE_SNIPPET_LENGTH = 40
 
         /** Probe sent, but the JS callback never came back within [BLANK_PROBE_TIMEOUT_MS]. */
         private const val BLANK_PROBE_NO_CALLBACK = "no-callback"
@@ -1172,6 +1220,10 @@ class LoginActivity : ComponentActivity() {
 
         /** Ticks the collection loop may run: 300 x 2 s = a 10 minute window. */
         private const val CUSTOMTABS_COLLECT_MAX_TICKS = 300
+
+        /** Ticks with zero doubao cookies before the browser is declared not to share the
+         * session: 15 x 2 s = 30 s. */
+        private const val CUSTOMTABS_NO_COOKIE_TICKS = 15
 
         /** How long the offscreen WebView may take to load the Doubao origin before a retry. */
         private const val OFFSCREEN_PAGE_LOAD_TIMEOUT_MS = 15_000L
