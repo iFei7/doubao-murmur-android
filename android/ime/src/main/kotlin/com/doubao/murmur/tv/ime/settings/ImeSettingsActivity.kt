@@ -8,20 +8,26 @@ import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -32,21 +38,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.tv.material3.Text
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
-import androidx.tv.material3.MaterialTheme
-import androidx.tv.material3.Text
 import com.doubao.murmur.tv.auth.EncryptedCredentialStore
 import com.doubao.murmur.tv.auth.SessionRepository
 import com.doubao.murmur.tv.ime.DoubaoVoiceInputMethodService
 import com.doubao.murmur.tv.ime.R
-import com.doubao.murmur.tv.ui.component.TvActionButton
-import com.doubao.murmur.tv.ui.component.TvChipTone
-import com.doubao.murmur.tv.ui.component.TvStatusChip
 import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
@@ -56,11 +61,11 @@ import kotlinx.coroutines.launch
 /**
  * Settings screen of the input method.
  *
- * Reachable three ways, all of them remote friendly: the MENU key on the keyboard, the "设置"
- * button in the header, and the system's "input method settings" entry (declared as
- * `android:settingsActivity` in `res/xml/method.xml`).
+ * Reachable three ways: the MENU key on the keyboard, the "设置" button in the header, and the
+ * system's "input method settings" entry (declared as `android:settingsActivity` in
+ * `res/xml/method.xml`).
  *
- * It exists mostly because two behaviours cannot be decided for the viewer up front: whether the
+ * It exists mostly because two behaviours cannot be decided for the user up front: whether the
  * host editor tolerates a composing region, and how long the recogniser may take to produce a
  * final transcript on a slow network. Both are exposed here instead of being hidden in code.
  */
@@ -77,7 +82,6 @@ class ImeSettingsActivity : ComponentActivity() {
                     preferences = preferences,
                     sessionRepository = sessionRepository,
                     lifecycleOwner = this@ImeSettingsActivity,
-                    onBack = { finish() },
                 )
             }
         }
@@ -89,10 +93,9 @@ private fun ImeSettingsScreen(
     preferences: ImePreferences,
     sessionRepository: SessionRepository,
     lifecycleOwner: LifecycleOwner,
-    onBack: () -> Unit,
 ) {
     val dimens = LocalDimens.current
-    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
+    val context = LocalContext.current
     var composingEnabled by remember { mutableStateOf(preferences.composingEnabled) }
     var timeoutMs by remember { mutableStateOf(preferences.finalTimeoutMs) }
     var loggedIn by remember { mutableStateOf<Boolean?>(null) }
@@ -105,169 +108,236 @@ private fun ImeSettingsScreen(
 
     Column(
         modifier = Modifier
-            .fillMaxWidth()
-            // A phone draws behind the translucent system bars; keep content clear of the status
-            // bar and the gesture strip. TV keeps the original overscan padding (and has no bars).
-            .then(if (compact) Modifier.safeDrawingPadding() else Modifier)
-            .padding(
-                // contentEdge: TV overscan (48 dp) / phone content margin (16 dp).
-                start = dimens.contentEdge,
-                end = dimens.contentEdge,
-                top = dimens.overscanVertical,
-                bottom = dimens.overscanVertical,
-            )
+            .fillMaxSize()
+            .background(MurmurColors.Background)
+            .safeDrawingPadding()
+            .padding(horizontal = dimens.contentEdge, vertical = 16.dp)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(dimens.keyGap),
     ) {
-        val statusChips: @Composable () -> Unit = {
-            when (loggedIn) {
-                true -> TvStatusChip(
-                    text = stringResource(R.string.login_success),
-                    tone = TvChipTone.Neutral,
-                )
-                false -> TvStatusChip(
-                    text = stringResource(R.string.ime_status_not_signed_in),
-                    tone = TvChipTone.Warning,
-                )
-                null -> Unit
-            }
-            if (signOutDone) {
-                TvStatusChip(
-                    text = stringResource(R.string.ime_settings_sign_out_done),
-                    tone = TvChipTone.Active,
-                )
-            }
-        }
-        if (compact) {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(dimens.keyGap),
-            ) {
-                Text(
-                    text = stringResource(R.string.ime_settings_title),
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = MurmurColors.OnBackground,
-                )
-                statusChips()
-            }
-        } else {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = stringResource(R.string.ime_settings_title),
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = MurmurColors.OnBackground,
-                )
-                Spacer(Modifier.width(dimens.keyGap))
-                statusChips()
-            }
-        }
+        Text(
+            text = stringResource(R.string.ime_settings_title),
+            color = MurmurColors.OnBackground,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Medium,
+        )
 
-        SectionTitle(stringResource(R.string.ime_settings_section_system))
-        SystemStatusSection(lifecycleOwner, compact)
+        // Login state row: the matching action sits on the right (sign out while signed in,
+        // sign in otherwise).
+        SettingsCard {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = when (loggedIn) {
+                            true -> stringResource(R.string.login_success)
+                            else -> stringResource(R.string.ime_status_not_signed_in)
+                        },
+                        color = MurmurColors.OnSurface,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    if (signOutDone) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = stringResource(R.string.ime_settings_sign_out_done),
+                            color = MurmurColors.Listening,
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+                when (loggedIn) {
+                    true -> CardAction(
+                        label = stringResource(R.string.ime_settings_action_sign_out),
+                        onClick = {
+                            scope.launch {
+                                runCatching { sessionRepository.clear() }
+                                loggedIn = false
+                                signOutDone = true
+                            }
+                        },
+                    )
+                    false -> CardAction(
+                        label = stringResource(R.string.ime_action_login),
+                        onClick = { openLogin(context) },
+                    )
+                    null -> Unit
+                }
+            }
+        }
 
         SectionTitle(stringResource(R.string.ime_settings_section_commit))
-        AdaptiveActionRow(compact = compact) {
-            TvActionButton(
-                text = stringResource(R.string.ime_settings_commit_composing),
-                onClick = {
-                    composingEnabled = true
-                    preferences.composingEnabled = true
-                },
-                modifier = Modifier.height(dimens.touchTargetMin),
-                selected = composingEnabled,
-            )
-            TvActionButton(
-                text = stringResource(R.string.ime_settings_commit_direct),
-                onClick = {
-                    composingEnabled = false
-                    preferences.composingEnabled = false
-                },
-                modifier = Modifier.height(dimens.touchTargetMin),
-                selected = !composingEnabled,
-            )
+        SettingsCard {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.ime_settings_commit_composing),
+                        color = MurmurColors.OnSurface,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = stringResource(R.string.ime_settings_commit_hint),
+                        color = MurmurColors.OnSurfaceMuted,
+                        fontSize = 12.sp,
+                    )
+                }
+                Switch(
+                    checked = composingEnabled,
+                    onCheckedChange = {
+                        composingEnabled = it
+                        preferences.composingEnabled = it
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedTrackColor = MurmurColors.Accent,
+                    ),
+                )
+            }
         }
-        HintText(stringResource(R.string.ime_settings_commit_hint))
 
         SectionTitle(stringResource(R.string.ime_settings_section_timeout))
-        AdaptiveActionRow(compact = compact) {
-            ImePreferences.FINAL_TIMEOUT_OPTIONS_MS.forEach { optionMs ->
-                TvActionButton(
-                    text = stringResource(
-                        R.string.ime_settings_timeout_seconds,
-                        formatSeconds(optionMs),
-                    ),
-                    onClick = {
-                        timeoutMs = optionMs
-                        preferences.finalTimeoutMs = optionMs
-                    },
-                    modifier = Modifier.height(dimens.touchTargetMin),
-                    selected = timeoutMs == optionMs,
-                )
+        SettingsCard {
+            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                ImePreferences.FINAL_TIMEOUT_OPTIONS_MS.forEach { optionMs ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                timeoutMs = optionMs
+                                preferences.finalTimeoutMs = optionMs
+                            }
+                            .padding(horizontal = 8.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = timeoutMs == optionMs,
+                            onClick = {
+                                timeoutMs = optionMs
+                                preferences.finalTimeoutMs = optionMs
+                            },
+                            colors = RadioButtonDefaults.colors(
+                                selectedColor = MurmurColors.Accent,
+                            ),
+                        )
+                        Text(
+                            text = stringResource(
+                                R.string.ime_settings_timeout_seconds,
+                                formatSeconds(optionMs),
+                            ),
+                            color = MurmurColors.OnSurface,
+                            fontSize = 15.sp,
+                        )
+                    }
+                }
             }
         }
         HintText(stringResource(R.string.ime_settings_timeout_hint))
 
+        // Only the missing step is offered: a dead "already done" row would just be noise.
+        val system = rememberImeSystemStatus(lifecycleOwner)
+        if (!system.enabled || !system.selected) {
+            SectionTitle(stringResource(R.string.ime_settings_section_system))
+            if (!system.enabled) {
+                SettingsCard {
+                    Row(
+                        modifier = Modifier
+                            .clickable { openSystemImeSettings(context) }
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.ime_settings_action_enable_system),
+                                color = MurmurColors.Accent,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = stringResource(R.string.ime_settings_ime_disabled),
+                                color = MurmurColors.OnSurfaceMuted,
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                }
+            }
+            if (!system.selected) {
+                SettingsCard {
+                    Row(
+                        modifier = Modifier
+                            .clickable { showImePicker(context) }
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.ime_settings_action_pick_ime),
+                                color = MurmurColors.Accent,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = stringResource(R.string.ime_settings_ime_not_selected),
+                                color = MurmurColors.OnSurfaceMuted,
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         SectionTitle(stringResource(R.string.ime_settings_section_privacy))
         HintText(stringResource(R.string.ime_settings_privacy_text))
 
-        AdaptiveActionRow(compact = compact) {
-            TvActionButton(
-                text = stringResource(R.string.ime_settings_action_sign_out),
-                onClick = {
-                    scope.launch {
-                        runCatching { sessionRepository.clear() }
-                        loggedIn = false
-                        signOutDone = true
-                    }
-                },
-                modifier = Modifier.height(dimens.touchTargetMin),
-                icon = Icons.Filled.Logout,
-                enabled = loggedIn == true,
-            )
-            TvActionButton(
-                text = stringResource(R.string.action_back),
-                onClick = onBack,
-                modifier = Modifier.height(dimens.touchTargetMin),
-                icon = Icons.Filled.KeyboardArrowLeft,
-            )
-        }
+        Spacer(modifier = Modifier.height(dimens.keyGap))
+        VersionFooter()
     }
 }
 
-/**
- * Horizontal button/chip group that stacks vertically on a compact phone.
- *
- * A plain `Row` of `TvActionButton`s overflows a 360 dp screen: each button has a minimum width
- * and the row has no weight child, so the accumulated non-weight width can exceed the available
- * width and trip the empty-range crash in `RowColumnMeasurePolicy`. A vertical `Column` has a
- * vertical main axis and cannot hit that width constraint; TV keeps the original `Row` verbatim.
- */
+/** Card container shared by every list row of the settings screen. */
 @Composable
-private fun AdaptiveActionRow(
-    compact: Boolean,
-    content: @Composable () -> Unit,
-) {
-    val dimens = LocalDimens.current
-    if (compact) {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(dimens.keyGap),
-        ) {
-            content()
-        }
-    } else {
-        Row(horizontalArrangement = Arrangement.spacedBy(dimens.keyGap)) {
-            content()
-        }
+private fun SettingsCard(content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MurmurColors.Surface)
+            .border(0.5.dp, MurmurColors.Outline, RoundedCornerShape(10.dp)),
+    ) {
+        content()
     }
+}
+
+/** Trailing text action inside a card (sign out / sign in). */
+@Composable
+private fun CardAction(label: String, onClick: () -> Unit) {
+    Text(
+        text = label,
+        color = MurmurColors.Accent,
+        fontSize = 14.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    )
 }
 
 @Composable
 private fun SectionTitle(text: String) {
     Text(
         text = text,
-        style = MaterialTheme.typography.titleMedium,
-        color = MurmurColors.Accent,
+        color = MurmurColors.OnSurfaceMuted,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Medium,
     )
 }
 
@@ -283,69 +353,41 @@ private fun formatSeconds(ms: Long): String =
 private fun HintText(text: String) {
     Text(
         text = text,
-        style = MaterialTheme.typography.bodySmall,
         color = MurmurColors.OnSurfaceMuted,
+        fontSize = 12.sp,
     )
 }
 
-/**
- * "Is this keyboard enabled / selected?" plus the two actions that fix it.
- *
- * This section exists because `:app` routes its "启用语音输入法" entry point here: a viewer who has
- * not enabled the keyboard yet cannot see the keyboard itself, so this screen is the only place
- * where the two required system steps can be explained. Without it the entry point would dead-end.
- *
- * The state is re-read on every `ON_RESUME`, which is exactly when the viewer comes back from the
- * system settings screen or from the input-method picker.
- */
 @Composable
-private fun SystemStatusSection(lifecycleOwner: LifecycleOwner, compact: Boolean) {
-    val dimens = LocalDimens.current
-    val system = rememberImeSystemStatus(lifecycleOwner)
+private fun VersionFooter() {
     val context = LocalContext.current
-
-    AdaptiveActionRow(compact = compact) {
-        TvStatusChip(
-            text = stringResource(
-                if (system.enabled) {
-                    R.string.ime_settings_ime_enabled
-                } else {
-                    R.string.ime_settings_ime_disabled
-                },
-            ),
-            tone = if (system.enabled) TvChipTone.Active else TvChipTone.Warning,
-        )
-        TvStatusChip(
-            text = stringResource(
-                if (system.selected) {
-                    R.string.ime_settings_ime_selected
-                } else {
-                    R.string.ime_settings_ime_not_selected
-                },
-            ),
-            tone = if (system.selected) TvChipTone.Active else TvChipTone.Warning,
+    val versionName = remember {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull()
+    }
+    if (versionName != null) {
+        Text(
+            text = versionName,
+            color = MurmurColors.OnSurfaceMuted.copy(alpha = 0.6f),
+            fontSize = 12.sp,
         )
     }
+}
 
-    // Only the missing step is offered: a dead "already done" button would just be another
-    // focusable stop the viewer has to walk past.
-    if (!system.enabled || !system.selected) {
-        AdaptiveActionRow(compact = compact) {
-            if (!system.enabled) {
-                TvActionButton(
-                    text = stringResource(R.string.ime_settings_action_enable_system),
-                    onClick = { openSystemImeSettings(context) },
-                    modifier = Modifier.height(dimens.touchTargetMin),
-                )
-            }
-            if (!system.selected) {
-                TvActionButton(
-                    text = stringResource(R.string.ime_settings_action_pick_ime),
-                    onClick = { showImePicker(context) },
-                    modifier = Modifier.height(dimens.touchTargetMin),
-                )
-            }
-        }
+/**
+ * Opens the login screen of `:app`.
+ *
+ * `:ime` cannot depend on `:app` code, so the activity is addressed by class name; the class name
+ * is stable across debug/release because only the application id gets a suffix, not the class
+ * package. Failures (build without :app, ROM quirk) are silently ignored.
+ */
+private fun openLogin(context: Context) {
+    runCatching {
+        context.startActivity(
+            Intent()
+                .setClassName(context, "com.doubao.murmur.tv.app.login.LoginActivity"),
+        )
     }
 }
 
@@ -390,9 +432,9 @@ private fun readImeSystemStatus(context: Context): ImeSystemStatus {
 /**
  * Opens the keyboard list of the system settings.
  *
- * `ACTION_INPUT_METHOD_SETTINGS` is missing on a fair number of TV ROMs (and on some it is
- * present but empty), so falling back to the root settings screen is the only other option that
- * exists on every device.
+ * `ACTION_INPUT_METHOD_SETTINGS` is missing on a fair number of ROMs (and on some it is present
+ * but empty), so falling back to the root settings screen is the only other option that exists on
+ * every device.
  */
 private fun openSystemImeSettings(context: Context) {
     val opened = runCatching {

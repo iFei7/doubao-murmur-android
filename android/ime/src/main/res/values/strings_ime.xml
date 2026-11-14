@@ -20,44 +20,25 @@
     <string name="ime_name">Doubao Voice Input</string>
     <string name="ime_subtype_zh">Chinese (voice)</string>
 
-    <!-- State labels -->
-    <string name="ime_state_idle">Ready</string>
+    <!-- State labels (shown only while a session is active; Idle shows no status) -->
     <string name="ime_state_connecting">Connecting</string>
-    <string name="ime_state_listening">Listening</string>
+    <string name="ime_state_listening">Listening…</string>
     <string name="ime_state_transcribing">Transcribing</string>
     <string name="ime_state_committed">Inserted</string>
 
     <!-- Status chips -->
     <string name="ime_status_not_signed_in">Not signed in</string>
-    <string name="ime_status_mic_denied">Microphone not granted</string>
+    <string name="ime_status_hands_free">Hands-free</string>
     <string name="login_success">Signed in</string>
 
-    <!-- Transcript card -->
-    <string name="ime_preview_placeholder">Hold OK and speak, release to insert</string>
-
     <!-- Actions -->
-    <string name="ime_action_login">Sign in</string>
-    <string name="ime_action_clear">Clear</string>
+    <string name="ime_action_login">Sign in to Doubao</string>
+    <string name="ime_action_hold_to_talk">Hold to talk</string>
     <string name="ime_action_cancel">Cancel</string>
-    <string name="ime_action_delete">Delete</string>
-    <string name="ime_action_newline">New line</string>
-    <string name="ime_action_hide">Hide</string>
+    <string name="ime_action_finish">Done</string>
     <string name="ime_action_settings">Input method settings</string>
-    <string name="ime_key_fallback_system">Switch to system keyboard</string>
-    <string name="mic_action_grant">Grant microphone access</string>
+    <string name="mic_action_grant">Allow microphone</string>
     <string name="action_back">Back</string>
-
-    <!-- Key hints -->
-    <string name="ime_hint_hold_to_talk">Hold OK to talk</string>
-    <string name="ime_hint_release_to_finish">Release to insert</string>
-    <string name="ime_hint_back_hide">BACK to hide</string>
-    <string name="ime_hint_back_cancel">BACK to cancel</string>
-    <string name="ime_hint_search_toggle">SEARCH to start or stop</string>
-    <string name="ime_hint_menu_settings">MENU for settings</string>
-    <!-- Compact-phone touch hints (no OK / SEARCH / MENU hardware keys) -->
-    <string name="ime_hint_phone_hold">Hold to talk</string>
-    <string name="ime_hint_phone_tap_latch">Tap for hands-free</string>
-    <string name="ime_hint_phone_tap_stop">Tap to stop</string>
 
     <!-- Errors -->
     <string name="ime_error_generic">Voice input failed, please try again</string>

@@ -12,44 +12,25 @@
     <string name="ime_name">豆包语音输入法</string>
     <string name="ime_subtype_zh">中文（语音）</string>
 
-    <!-- 状态 -->
-    <string name="ime_state_idle">准备就绪</string>
+    <!-- 状态（仅在会话进行中显示；Idle 不显示状态行） -->
     <string name="ime_state_connecting">连接中</string>
-    <string name="ime_state_listening">正在聆听</string>
+    <string name="ime_state_listening">正在聆听…</string>
     <string name="ime_state_transcribing">识别中</string>
     <string name="ime_state_committed">已上屏</string>
 
     <!-- 状态标签 -->
     <string name="ime_status_not_signed_in">未登录</string>
-    <string name="ime_status_mic_denied">麦克风未授权</string>
+    <string name="ime_status_hands_free">免提中</string>
     <string name="login_success">已登录</string>
 
-    <!-- 转写卡片 -->
-    <string name="ime_preview_placeholder">按住 OK 说话，松手即上屏</string>
-
     <!-- 操作 -->
-    <string name="ime_action_login">去登录</string>
-    <string name="ime_action_clear">清空</string>
+    <string name="ime_action_login">登录豆包账号</string>
+    <string name="ime_action_hold_to_talk">按住说话</string>
     <string name="ime_action_cancel">取消</string>
-    <string name="ime_action_delete">删除</string>
-    <string name="ime_action_newline">换行</string>
-    <string name="ime_action_hide">收起</string>
+    <string name="ime_action_finish">完成</string>
     <string name="ime_action_settings">输入法设置</string>
-    <string name="ime_key_fallback_system">切换回系统键盘</string>
-    <string name="mic_action_grant">授予麦克风权限</string>
+    <string name="mic_action_grant">允许麦克风</string>
     <string name="action_back">返回</string>
-
-    <!-- 按键提示 -->
-    <string name="ime_hint_hold_to_talk">按住 OK 说话</string>
-    <string name="ime_hint_release_to_finish">松手即上屏</string>
-    <string name="ime_hint_back_hide">BACK 收起</string>
-    <string name="ime_hint_back_cancel">BACK 取消</string>
-    <string name="ime_hint_search_toggle">SEARCH 开始/结束</string>
-    <string name="ime_hint_menu_settings">MENU 设置</string>
-    <!-- 手机竖屏触摸提示（无 OK / SEARCH / MENU 实体键） -->
-    <string name="ime_hint_phone_hold">按住说话</string>
-    <string name="ime_hint_phone_tap_latch">轻点连说</string>
-    <string name="ime_hint_phone_tap_stop">轻点结束</string>
 
     <!-- 错误 -->
     <string name="ime_error_generic">语音输入失败，请重试</string>

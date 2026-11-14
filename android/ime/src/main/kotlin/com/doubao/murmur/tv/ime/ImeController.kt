@@ -297,28 +297,6 @@ class ImeController(
         }
     }
 
-    /** SEARCH key / short OK on the mic button: start when idle, finish when listening. */
-    fun toggleListening() {
-        if (_state.value.state is ImeState.Listening) {
-            endListening()
-        } else {
-            beginListening()
-        }
-    }
-
-    /** "Clear" button: drops the preview/composing text without touching the rest of the field. */
-    fun clearTransient() {
-        if (_state.value.isCapturing) return
-        committer.abandonComposing()
-        lastPartial = ""
-        _state.update { it.copy(state = ImeState.Idle, preview = "", errorMessage = null, level = 0f) }
-    }
-
-    /** Backspace from the remote's DEL key. */
-    fun deleteBackward(count: Int) {
-        committer.deleteBackward(count)
-    }
-
     /** Refreshes the sign-in / microphone chips, e.g. right after the input view is shown. */
     fun refreshStatus() {
         scope.launch {
