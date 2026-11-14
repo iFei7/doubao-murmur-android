@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -16,7 +17,6 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import com.doubao.murmur.tv.app.diagnostics.DiagnosticsActivity
 import com.doubao.murmur.tv.app.ime.ImeHelper
 import com.doubao.murmur.tv.app.login.LoginActivity
 import com.doubao.murmur.tv.app.permission.MicPermissionActivity
@@ -29,9 +29,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Leanback launcher entry point: one screen that says what is still missing and how to fix it.
+ * Launcher entry point: one screen that says what is still missing and how to fix it.
  *
- * Setup on a TV is a three step affair the user cannot be expected to remember - sign in, grant the
+ * Setup is a three step affair the user cannot be expected to remember - sign in, grant the
  * microphone, enable the keyboard - so the only job of this activity is to keep an honest snapshot
  * of those three states and to offer the matching shortcut for each one.
  */
@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity() {
      */
     private val loginLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            refreshState()
+            refreshState(force = true)
         }
 
     private val micLauncher =
@@ -61,15 +61,13 @@ class MainActivity : ComponentActivity() {
                 toast(getString(R.string.mic_permanently_denied_hint))
                 openAppSettings()
             }
-            refreshState()
+            refreshState(force = true)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Draw behind the system bars so the compact (phone) branch's `safeDrawingPadding` gets
-        // real, live insets. On a TV there are no status/nav bars, so this is a no-op there.
-        // The theme's deprecated windowTranslucentStatus/Navigation flags are left untouched:
-        // they already draw behind the bars and compose fine with this API on API 29+.
+        // Draw behind the system bars; the screens add `safeDrawingPadding` so content stays clear
+        // of the status bar and the gesture strip.
         enableEdgeToEdge()
         sessionRepository = AppGraph.sessionRepository(this)
 
@@ -80,8 +78,6 @@ class MainActivity : ComponentActivity() {
                     onLogin = ::startLogin,
                     onMicPermission = ::requestMicrophone,
                     onImeAction = ::handleImeAction,
-                    onDiagnostics = { startActivity(Intent(this, DiagnosticsActivity::class.java)) },
-                    onRefresh = ::refreshState,
                 )
             }
         }
@@ -104,12 +100,12 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * One button, three different destinations depending on how far the setup got.
+     * One entry, three different destinations depending on how far the setup got.
      *
      * Not enabled yet: our own settings page in `:ime` is the primary target. It walks through both
-     * steps and prints the adb lines, and it exists on every build - unlike
-     * `ACTION_INPUT_METHOD_SETTINGS`, which a good share of TV ROMs do not have (and whose root
-     * `ACTION_SETTINGS` fallback hides the keyboard list several levels deep).
+     * steps, and it exists on every build - unlike `ACTION_INPUT_METHOD_SETTINGS`, which some ROMs
+     * do not have (and whose root `ACTION_SETTINGS` fallback hides the keyboard list several
+     * levels deep).
      *
      * Enabled but not current: the system picker is the shortest path. Enabled and current: the
      * settings page again, because that is where sign-out and the commit-mode options live.
@@ -123,7 +119,7 @@ class MainActivity : ComponentActivity() {
             else -> ImeHelper.openOwnImeSettings(this)
         }
         if (!opened) {
-            toast(getString(R.string.ime_adb_hint_title))
+            toast(getString(R.string.home_ime_open_failed))
         }
     }
 
@@ -135,18 +131,26 @@ class MainActivity : ComponentActivity() {
         try {
             startActivity(intent)
         } catch (e: ActivityNotFoundException) {
-            // Not reachable on a Play-certified TV, and there is no useful fallback if it happens.
+            // Not reachable on a certified device, and there is no useful fallback if it happens.
         }
     }
 
     /**
-     * Re-reads the three states.
+     * Re-reads the setup states.
      *
-     * The microphone probe opens `AudioRecord` to learn which sample rate the device really
-     * supports, which is far too slow for the main thread, so it runs on the IO dispatcher. Nothing
-     * here touches credentials beyond a boolean.
+     * Probing is not free: the login check decrypts the credential store, the microphone probe
+     * opens `AudioRecord` on the IO dispatcher, and the IME flags round-trip through system
+     * settings. Since [refreshState] fires on every RESUMED period, the expensive probes are
+     * throttled to [STATE_CACHE_MS]; callers that just returned from a screen whose only purpose
+     * was to change one of these states (login, permission dialog) pass `force = true` to bypass
+     * the throttle.
      */
-    private fun refreshState() {
+    private fun refreshState(force: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastProbeAtMs < STATE_CACHE_MS) {
+            return
+        }
+        lastProbeAtMs = now
         lifecycleScope.launch {
             val micGranted = MicPermission.hasRecordPermission(this@MainActivity)
             val capability = if (micGranted) {
@@ -161,8 +165,8 @@ class MainActivity : ComponentActivity() {
             state = HomeUiState(
                 loggedIn = loggedIn,
                 micGranted = micGranted,
-                // A missing capability object only means "not probed yet"; do not claim the TV has
-                // no microphone in that case.
+                // A missing capability object only means "not probed yet"; do not claim the device
+                // has no microphone in that case.
                 micAvailable = capability?.hasMicrophone ?: true,
                 imeEnabled = ImeHelper.isImeEnabled(this@MainActivity),
                 imeSelected = ImeHelper.isImeSelected(this@MainActivity),
@@ -171,7 +175,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var lastProbeAtMs = 0L
+
     private fun toast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    private companion object {
+
+        /** Cheap cached-state window; probes older than this are re-run on the next resume. */
+        const val STATE_CACHE_MS = 5_000L
     }
 }

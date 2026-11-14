@@ -1,14 +1,12 @@
 package com.doubao.murmur.tv.app
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -16,44 +14,34 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-// `androidx.tv.material3` does not ship an AlertDialog (tv-material 1.0.0 has no such component),
-// so the one dialog in the app stays on material3 and takes its colours from the material3 theme
-// domain that MurmurTvTheme nests inside the tv-material theme. Text/Surface, by contrast, must come
-// from tv-material: they read `LocalColorScheme` of the tv theme, and a material3 Text would fall
-// back to the light material3 scheme - dark text on our near-black TV background.
-import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
-import com.doubao.murmur.tv.app.ime.ImeHelper
-import com.doubao.murmur.tv.ui.component.TvActionButton
-import com.doubao.murmur.tv.ui.component.TvChipTone
-import com.doubao.murmur.tv.ui.component.TvFocusableSurface
-import com.doubao.murmur.tv.ui.component.TvStatusChip
 import com.doubao.murmur.tv.ui.theme.LocalDimens
 import com.doubao.murmur.tv.ui.theme.MurmurColors
-import com.doubao.murmur.tv.ui.theme.TvDimens
 
 /**
  * Everything the home screen renders, captured as one immutable snapshot.
  *
- * The launcher re-probes on every `onResume` because the user routinely leaves for the system
- * settings app to grant the microphone permission or to enable the keyboard, then comes back. All
- * fields are plain booleans so the snapshot can be compared cheaply by Compose.
+ * The launcher re-probes on every `onResume` (throttled by [MainActivity]) because the user
+ * routinely leaves for the system settings app to grant the microphone permission or to enable
+ * the keyboard, then comes back. All fields are plain booleans so the snapshot can be compared
+ * cheaply by Compose.
  */
 data class HomeUiState(
     val loggedIn: Boolean = false,
@@ -63,33 +51,16 @@ data class HomeUiState(
     val imeSelected: Boolean = false,
     val loading: Boolean = true,
 ) {
-
-    /** Steps are login, microphone, keyboard - the three things without which nothing works. */
-    val completedSteps: Int
-        get() = listOf(loggedIn, micGranted, imeEnabled && imeSelected).count { it }
-
-    val remainingSteps: Int
-        get() = TOTAL_STEPS - completedSteps
-
+    /** Ready only when login, microphone and the keyboard setup are all complete. */
     val ready: Boolean
-        get() = remainingSteps == 0
-
-    private companion object {
-        const val TOTAL_STEPS = 3
-    }
+        get() = loggedIn && micGranted && micAvailable && imeEnabled && imeSelected
 }
 
 /**
- * One-screen TV launcher.
- *
- * Deliberately not a scrolling list: a 10-foot UI is read at a distance, and a vertical list of
- * cards forces the user to scroll with a remote before they can even see what is missing. Two
- * columns - status on the left, actions on the right - keep everything visible at once and give
- * the D-pad a predictable left/right path.
+ * Phone home screen: either a three step setup guide or a "ready" confirmation.
  *
  * The composable is pure: no Android services, no coroutines, no permissions. [MainActivity] owns
- * all of that and only hands down a snapshot plus callbacks. The one exception is the about
- * dialog, which is static text and would not justify another activity.
+ * all of that and only hands down a snapshot plus callbacks.
  */
 @Composable
 fun HomeScreen(
@@ -97,373 +68,246 @@ fun HomeScreen(
     onLogin: () -> Unit,
     onMicPermission: () -> Unit,
     onImeAction: () -> Unit,
-    onDiagnostics: () -> Unit,
-    onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var showAbout by remember { mutableStateOf(false) }
     val dimens = LocalDimens.current
-    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
 
-    if (compact) {
-        // Portrait phone: one scrolling column. The two TV columns stack, the 48 dp divider spacer
-        // is dropped, and safeDrawing keeps content clear of the translucent system bars.
+    if (state.ready) {
         Column(
             modifier = modifier
                 .fillMaxSize()
                 .background(MurmurColors.Background)
                 .safeDrawingPadding()
-                .padding(
-                    // contentEdge: TV overscan (48 dp) / phone content margin (16 dp).
-                    horizontal = dimens.contentEdge,
-                    vertical = 16.dp,
-                )
-                .verticalScroll(rememberScrollState()),
+                .padding(horizontal = dimens.contentEdge)
+                .padding(vertical = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            StatusColumn(
-                state = state,
-                onLogin = onLogin,
-                onMicPermission = onMicPermission,
-                onImeAction = onImeAction,
-                compact = true,
-                modifier = Modifier.fillMaxWidth(),
+            Spacer(modifier = Modifier.weight(1f))
+            ReadyHero()
+            Spacer(modifier = Modifier.height(32.dp))
+            ReadyListRow(
+                label = stringResource(R.string.home_row_settings),
+                onClick = onImeAction,
             )
-            Spacer(modifier = Modifier.height(dimens.keyGap * 2))
-            ActionColumn(
-                state = state,
-                onLogin = onLogin,
-                onMicPermission = onMicPermission,
-                onImeAction = onImeAction,
-                onDiagnostics = onDiagnostics,
-                onAbout = { showAbout = true },
-                onRefresh = onRefresh,
-                modifier = Modifier.fillMaxWidth(),
-                compact = true,
+            Spacer(modifier = Modifier.height(dimens.keyGap))
+            ReadyListRow(
+                label = stringResource(R.string.home_row_login_status) +
+                    " · " + stringResource(R.string.login_success),
+                onClick = onLogin,
             )
+            Spacer(modifier = Modifier.weight(1f))
             VersionFooter()
-
-            if (showAbout) {
-                AboutDialog(
-                    onDismiss = { showAbout = false },
-                )
-            }
         }
     } else {
-        // TV: the original non-scrolling two-column layout, unchanged (zero visual change).
         Column(
             modifier = modifier
                 .fillMaxSize()
                 .background(MurmurColors.Background)
-                // 5% overscan safe area, see docs/tv-adaptation.md section 6.1.
-                .padding(TvDimens.overscanHorizontal, TvDimens.overscanVertical),
+                .safeDrawingPadding()
+                .padding(horizontal = dimens.contentEdge, vertical = 16.dp)
+                .verticalScroll(rememberScrollState()),
         ) {
-            Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                StatusColumn(
-                    state = state,
-                    onLogin = onLogin,
-                    onMicPermission = onMicPermission,
-                    onImeAction = onImeAction,
-                    compact = false,
-                    modifier = Modifier.fillMaxHeight().weight(1.35f),
+            Text(
+                text = stringResource(R.string.main_title),
+                color = MurmurColors.OnBackground,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = stringResource(R.string.home_subtitle_setup),
+                color = MurmurColors.OnSurfaceMuted,
+                fontSize = 13.sp,
+            )
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // While the first probe is running the states are unknown; showing "not done" would
+            // be a lie, so the cards wait for the snapshot.
+            if (!state.loading) {
+                StepCard(
+                    index = "1",
+                    title = stringResource(R.string.home_step_login_title),
+                    description = stringResource(R.string.home_step_login_desc),
+                    done = state.loggedIn,
+                    actionText = stringResource(R.string.home_step_login_action),
+                    onClick = onLogin,
                 )
-                Spacer(modifier = Modifier.width(TvDimens.keyGap * 4))
-                ActionColumn(
-                    state = state,
-                    onLogin = onLogin,
-                    onMicPermission = onMicPermission,
-                    onImeAction = onImeAction,
-                    onDiagnostics = onDiagnostics,
-                    onAbout = { showAbout = true },
-                    onRefresh = onRefresh,
-                    modifier = Modifier.fillMaxHeight().weight(1f),
+                Spacer(modifier = Modifier.height(dimens.keyGap))
+                StepCard(
+                    index = "2",
+                    title = stringResource(R.string.home_step_mic_title),
+                    description = stringResource(R.string.home_step_mic_desc),
+                    done = state.micGranted && state.micAvailable,
+                    actionText = stringResource(R.string.home_step_mic_action),
+                    onClick = onMicPermission,
+                )
+                Spacer(modifier = Modifier.height(dimens.keyGap))
+                StepCard(
+                    index = "3",
+                    title = stringResource(R.string.home_step_ime_title),
+                    description = stringResource(R.string.home_step_ime_desc),
+                    done = state.imeEnabled && state.imeSelected,
+                    actionText = stringResource(R.string.home_step_ime_action),
+                    onClick = onImeAction,
                 )
             }
+
+            Spacer(modifier = Modifier.height(24.dp))
             VersionFooter()
-
-            if (showAbout) {
-                AboutDialog(
-                    onDismiss = { showAbout = false },
-                )
-            }
         }
     }
 }
 
+/** One setup step: numbered badge on the left, texts in the middle, action on the right. */
 @Composable
-private fun StatusColumn(
-    state: HomeUiState,
-    onLogin: () -> Unit,
-    onMicPermission: () -> Unit,
-    onImeAction: () -> Unit,
-    compact: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val dimens = LocalDimens.current
-    Column(modifier = modifier) {
-        // 38 sp is a 10-foot headline; a phone in hand reads comfortably at 28 sp.
-        Text(
-            text = stringResource(R.string.main_title),
-            color = MurmurColors.OnBackground,
-            fontSize = if (compact) 28.sp else 38.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = stringResource(R.string.main_subtitle),
-            color = MurmurColors.OnSurfaceMuted,
-            fontSize = 17.sp,
-        )
-        Spacer(modifier = Modifier.height(18.dp))
-
-        // While the first probe is running, claiming "not configured" would be a lie.
-        when {
-            state.loading -> TvStatusChip(
-                text = stringResource(R.string.login_progress),
-                tone = TvChipTone.Neutral,
-            )
-            state.ready -> TvStatusChip(
-                text = stringResource(R.string.home_all_ready),
-                tone = TvChipTone.Active,
-            )
-            else -> TvStatusChip(
-                text = stringResource(R.string.home_remaining_steps, state.remainingSteps),
-                tone = TvChipTone.Warning,
-            )
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        StatusCard(
-            done = state.loggedIn,
-            title = stringResource(R.string.login_title),
-            stateText = if (state.loggedIn) {
-                stringResource(R.string.login_success)
-            } else {
-                stringResource(R.string.state_todo)
-            },
-            actionText = if (state.loggedIn) null else stringResource(R.string.main_action_login),
-            onAction = onLogin,
-        )
-        Spacer(modifier = Modifier.height(dimens.keyGap))
-        StatusCard(
-            done = state.micGranted && state.micAvailable,
-            title = stringResource(R.string.mic_title),
-            stateText = when {
-                !state.micAvailable -> stringResource(R.string.mic_state_missing)
-                state.micGranted -> stringResource(R.string.mic_state_granted)
-                else -> stringResource(R.string.mic_state_not_granted)
-            },
-            actionText = if (state.micGranted) null else stringResource(R.string.mic_action_grant),
-            onAction = onMicPermission,
-        )
-        Spacer(modifier = Modifier.height(dimens.keyGap))
-        StatusCard(
-            done = state.imeEnabled && state.imeSelected,
-            title = stringResource(R.string.enable_ime_title),
-            stateText = when {
-                !state.imeEnabled -> stringResource(R.string.ime_state_off)
-                !state.imeSelected -> stringResource(R.string.ime_state_not_selected)
-                else -> stringResource(R.string.enable_ime_state_enabled)
-            },
-            actionText = when {
-                !state.imeEnabled -> stringResource(R.string.enable_ime_action_open_settings)
-                !state.imeSelected -> stringResource(R.string.ime_action_pick)
-                else -> null
-            },
-            onAction = onImeAction,
-        )
-    }
-}
-
-/**
- * A single readiness row: colour dot, what it is, what state it is in, and - only while it is not
- * finished - the button that fixes it.
- *
- * The button disappears once the step is done, which keeps the focus path short: a finished step
- * must not compete with the remaining work. The container itself is not focusable, so the D-pad
- * only ever stops on actionable controls.
- */
-@Composable
-private fun StatusCard(
-    done: Boolean,
+private fun StepCard(
+    index: String,
     title: String,
-    stateText: String,
-    actionText: String?,
-    onAction: () -> Unit,
+    description: String,
+    done: Boolean,
+    actionText: String,
+    onClick: () -> Unit,
 ) {
-    val dimens = LocalDimens.current
-    // A static, non-clickable card: tv-material's `Surface` in 1.0.0 takes a `SurfaceColors`
-    // object (not a plain `color`), so a plain Box with a background shape is simpler and exact.
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MurmurColors.Surface, RoundedCornerShape(dimens.cornerLarge)),
+            .clip(RoundedCornerShape(10.dp))
+            .background(MurmurColors.Surface)
+            .border(0.5.dp, MurmurColors.Outline, RoundedCornerShape(10.dp))
+            .clickable(enabled = !done, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
-                    .size(12.dp)
+                    .size(28.dp)
                     .clip(CircleShape)
-                    .background(if (done) MurmurColors.Listening else MurmurColors.Warning),
-            )
-            Spacer(modifier = Modifier.width(16.dp))
+                    .background(MurmurColors.Accent.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (done) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = null,
+                        tint = MurmurColors.Listening,
+                        modifier = Modifier.size(16.dp),
+                    )
+                } else {
+                    Text(
+                        text = index,
+                        color = MurmurColors.Accent,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
                     color = MurmurColors.OnSurface,
-                    fontSize = 18.sp,
+                    fontSize = 15.sp,
                     fontWeight = FontWeight.Medium,
                 )
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = stateText,
-                    color = if (done) MurmurColors.Listening else MurmurColors.OnSurfaceMuted,
-                    fontSize = 14.sp,
+                    text = description,
+                    color = MurmurColors.OnSurfaceMuted,
+                    fontSize = 12.sp,
                 )
             }
-            if (actionText != null) {
-                Spacer(modifier = Modifier.width(dimens.keyGap))
-                TvActionButton(text = actionText, onClick = onAction)
+            Spacer(modifier = Modifier.width(12.dp))
+            if (done) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = null,
+                    tint = MurmurColors.Listening,
+                    modifier = Modifier.size(18.dp),
+                )
+            } else {
+                Text(
+                    text = actionText,
+                    color = MurmurColors.Accent,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                )
             }
         }
     }
 }
 
+/** Centered confirmation shown once every setup step is complete. */
 @Composable
-private fun ActionColumn(
-    state: HomeUiState,
-    onLogin: () -> Unit,
-    onMicPermission: () -> Unit,
-    onImeAction: () -> Unit,
-    onDiagnostics: () -> Unit,
-    onAbout: () -> Unit,
-    onRefresh: () -> Unit,
-    compact: Boolean = false,
-    modifier: Modifier = Modifier,
-) {
-    Column(modifier = modifier) {
-        Text(
-            text = stringResource(R.string.home_section_actions),
-            color = MurmurColors.OnSurfaceMuted,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        Spacer(modifier = Modifier.height(6.dp))
-        ActionEntry(stringResource(R.string.main_action_login), onLogin)
-        ActionEntry(stringResource(R.string.main_action_mic), onMicPermission)
-        ActionEntry(stringResource(R.string.main_action_enable_ime), onImeAction)
-        ActionEntry(stringResource(R.string.main_action_diagnostics), onDiagnostics)
-        ActionEntry(stringResource(R.string.main_action_about), onAbout)
-        ActionEntry(stringResource(R.string.action_refresh), onRefresh)
-
-        // On a scrolling phone column there is no bounded remaining height for weight(1f), so the
-        // bottom-pinned hint becomes a fixed gap there. TV keeps weight(1f) exactly as before.
-        if (compact) {
-            Spacer(modifier = Modifier.height(LocalDimens.current.keyGap))
-        } else {
-            Spacer(modifier = Modifier.weight(1f))
-        }
-
-        // Boxes without a keyboard settings screen are common; surfacing the two adb lines here is
-        // often faster than talking a user through a hidden OEM menu.
-        Text(
-            text = stringResource(R.string.ime_adb_hint_title),
-            color = MurmurColors.OnSurfaceMuted,
-            fontSize = 12.sp,
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = ImeHelper.adbHint(),
-            color = MurmurColors.OnSurfaceMuted.copy(alpha = 0.7f),
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-        )
-        if (!state.imeEnabled) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = stringResource(R.string.enable_ime_description),
-                color = MurmurColors.OnSurfaceMuted.copy(alpha = 0.7f),
-                fontSize = 12.sp,
+private fun ReadyHero() {
+    val dimens = LocalDimens.current
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .size(dimens.micButtonSize)
+                .clip(CircleShape)
+                .background(MurmurColors.Listening.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Mic,
+                contentDescription = null,
+                tint = MurmurColors.Listening,
+                modifier = Modifier.size(28.dp),
             )
         }
+        Spacer(modifier = Modifier.height(20.dp))
+        Text(
+            text = stringResource(R.string.home_ready_title),
+            color = MurmurColors.OnBackground,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.home_ready_hint),
+            color = MurmurColors.OnSurfaceMuted,
+            fontSize = 14.sp,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 
+/** A simple list entry of the ready state: label on the left, chevron on the right. */
 @Composable
-private fun ActionEntry(label: String, onClick: () -> Unit) {
-    TvFocusableSurface(
-        onClick = onClick,
+private fun ReadyListRow(
+    label: String,
+    onClick: () -> Unit,
+) {
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = LocalDimens.current.keyGap / 2),
+            .clip(RoundedCornerShape(10.dp))
+            .background(MurmurColors.Surface)
+            .border(0.5.dp, MurmurColors.Outline, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(text = label, color = MurmurColors.OnSurface, fontSize = 17.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = label,
+                color = MurmurColors.OnSurface,
+                fontSize = 15.sp,
+            )
             Spacer(modifier = Modifier.weight(1f))
-            Text(text = "\u203A", color = MurmurColors.OnSurfaceMuted, fontSize = 17.sp)
+            Text(
+                text = "\u203A",
+                color = MurmurColors.OnSurfaceMuted,
+                fontSize = 16.sp,
+            )
         }
     }
 }
 
 @Composable
 private fun VersionFooter() {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 12.dp),
-        horizontalArrangement = Arrangement.Start,
-    ) {
-        Text(
-            text = stringResource(
-                R.string.home_version_line,
-                BuildConfig.VERSION_NAME,
-                BuildConfig.GIT_SHA,
-                BuildConfig.BUILD_CHANNEL,
-            ),
-            color = MurmurColors.OnSurfaceMuted.copy(alpha = 0.6f),
-            fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
-        )
-    }
-}
-
-@Composable
-private fun AboutDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = MurmurColors.Surface,
-        title = {
-            Text(
-                text = stringResource(R.string.about_title),
-                color = MurmurColors.OnSurface,
-                fontSize = 22.sp,
-            )
-        },
-        text = {
-            Text(
-                text = stringResource(
-                    R.string.about_body,
-                    BuildConfig.VERSION_NAME,
-                    BuildConfig.GIT_SHA,
-                ),
-                color = MurmurColors.OnSurfaceMuted,
-                fontSize = 15.sp,
-            )
-        },
-        confirmButton = {
-            TvActionButton(
-                text = stringResource(R.string.action_close),
-                onClick = onDismiss,
-            )
-        },
+    Text(
+        text = stringResource(R.string.home_version, BuildConfig.VERSION_NAME),
+        color = MurmurColors.OnSurfaceMuted.copy(alpha = 0.6f),
+        fontSize = 12.sp,
     )
 }

@@ -19,7 +19,6 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.annotation.Keep
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,15 +27,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -46,7 +46,6 @@ import com.doubao.murmur.tv.app.AppGraph
 import com.doubao.murmur.tv.app.R
 import com.doubao.murmur.tv.auth.DoubaoLoginUrl
 import com.doubao.murmur.tv.auth.SessionRepository
-import com.doubao.murmur.tv.ui.component.TvActionButton
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
 import kotlinx.coroutines.launch
@@ -62,12 +61,11 @@ import org.json.JSONTokener
  * ## Waiting is bounded
  * A failed extraction is silent - the user is usually still typing - but it is not *unbounded*.
  * The injected poller gives up after ~48 s and reports back through [LoginBridge]; from then on the
- * hint bar offers an explicit retry instead of leaving the viewer on a page that will never close.
- * A TV viewer who scanned a QR code has no other way to tell "still working" from "broken".
+ * toolbar offers an explicit retry instead of leaving the user on a page that will never close.
  *
  * Security: cookies and localStorage ids are passed straight to [SessionRepository] and encrypted
  * with an Android Keystore master key on this device. They are never logged, never sent anywhere
- * except the Doubao domains that issued them, and never leave the TV.
+ * except the Doubao domains that issued them, and never leave the device.
  */
 class LoginActivity : ComponentActivity() {
 
@@ -91,13 +89,16 @@ class LoginActivity : ComponentActivity() {
     /** Drives the hint bar: the retry affordance only exists once the poller gave up. */
     private var phase by mutableStateOf(LoginPhase.Waiting)
 
+    /** Back handler that walks the WebView history; enabled/disabled by [updateBackState]. */
+    private lateinit var backCallback: OnBackPressedCallback
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         sessionRepository = AppGraph.sessionRepository(this)
 
         // Default outcome. Every way out of this screen except a successful extraction - BACK (once
-        // the WebView history is exhausted), the on-screen back button, HOME from the remote -
-        // therefore reports "not signed in".
+        // the WebView history is exhausted), the on-screen back button, HOME - therefore reports
+        // "not signed in".
         setResult(RESULT_CANCELED)
 
         setContent {
@@ -105,6 +106,7 @@ class LoginActivity : ComponentActivity() {
                 LoginScreen(
                     phase = phase,
                     backLabel = stringResource(R.string.action_back),
+                    titleLabel = stringResource(R.string.login_title),
                     retryLabel = stringResource(R.string.login_action_retry),
                     onBack = { finish() },
                     onRetry = ::retrySave,
@@ -114,24 +116,34 @@ class LoginActivity : ComponentActivity() {
             }
         }
 
-        // PHONE: the back gesture/gesture bar first walks back through the WebView history (e.g.
-        // out of a wrong QR page, back to the entry page); only a history-less WebView closes the
-        // screen. TV: `ComponentActivity` routes KEYCODE_BACK through the same dispatcher, so the
-        // remote's BACK key now also navigates the page backwards before it closes the screen -
-        // the on-screen "back" button above still finishes the activity directly.
-        onBackPressedDispatcher.addCallback(
-            this,
-            object : OnBackPressedCallback(true) {
-                override fun handleOnBackPressed() {
-                    val view = webView
-                    if (view != null && view.canGoBack()) {
-                        view.goBack()
-                    } else {
-                        finish()
-                    }
-                }
-            },
-        )
+        // The back gesture/gesture bar walks back through the WebView history (e.g. out of a wrong
+        // QR page, back to the entry page) - but only while there is history to walk AND the login
+        // has not succeeded yet (see [updateBackState]). Whenever the callback is disabled the
+        // system default applies, which finishes the activity.
+        backCallback = object : OnBackPressedCallback(false) {
+            override fun handleOnBackPressed() {
+                webView?.goBack()
+            }
+        }
+        onBackPressedDispatcher.addCallback(this, backCallback)
+    }
+
+    /**
+     * Recomputes whether BACK should navigate the WebView instead of closing the screen.
+     *
+     * The callback is enabled only when all of these hold:
+     * - the login has not succeeded yet - after a success the activity is on its way out and BACK
+     *   must never be swallowed by stale page history;
+     * - the WebView can go back - otherwise there is nothing to walk and the screen should close;
+     * - the history is shallow enough. Login redirects can build deep, cyclic histories (SSO
+     *   round trips re-enter the same pages), so stepping back one entry at a time would trap the
+     *   user in a redirect loop they can never escape. Past [MAX_BACK_HISTORY] entries the
+     *   callback stays disabled and BACK finishes the activity instead.
+     */
+    private fun updateBackState() {
+        val view = webView
+        backCallback.isEnabled = !signedIn && view != null && view.canGoBack() &&
+            view.copyBackForwardList().size <= MAX_BACK_HISTORY
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -165,6 +177,8 @@ class LoginActivity : ComponentActivity() {
             view.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String?) {
                     super.onPageFinished(view, url)
+                    // The history shape changed; BACK may gain or lose its page-navigation role.
+                    updateBackState()
                     // Start the localStorage poll on every navigation; the script is idempotent.
                     view.evaluateJavascript(LOGIN_POLL_JS, null)
 
@@ -190,6 +204,7 @@ class LoginActivity : ComponentActivity() {
                 BRIDGE_NAME,
             )
             view.loadUrl(DoubaoLoginUrl.LOGIN_URL)
+            updateBackState()
         } catch (e: RuntimeException) {
             // A ROM without a usable WebView provider throws on the first settings or
             // CookieManager call as well, not only on construction. Drop the half-built view so
@@ -263,6 +278,8 @@ class LoginActivity : ComponentActivity() {
             return
         }
         signedIn = true
+        // BACK must never be swallowed by the page history once the login succeeded.
+        backCallback.isEnabled = false
         setResult(RESULT_OK)
         finish()
     }
@@ -301,6 +318,7 @@ class LoginActivity : ComponentActivity() {
         // suspends, so the poller is re-armed before the extraction can finish the activity.
         attemptSave()
         view.evaluateJavascript(LOGIN_POLL_JS, null)
+        updateBackState()
     }
 
     /**
@@ -344,6 +362,12 @@ class LoginActivity : ComponentActivity() {
 
         /** Doubao appends this marker when the login round-trip comes back. */
         private const val FROM_LOGIN_MARKER = "from_login=1"
+
+        /**
+         * Beyond this many WebView history entries BACK stops stepping back and closes the screen
+         * instead, so a cyclic redirect chain can never trap the user.
+         */
+        private const val MAX_BACK_HISTORY = 15
 
         /**
          * Matches [MurmurColors.Background] so the WebView does not flash white before the page
@@ -465,99 +489,67 @@ private const val LOGIN_FLAG_QUERY_JS =
     "try { localStorage.getItem('flow_web_has_login') } catch (e) { null }"
 
 /**
- * Full screen WebView plus a TV friendly hint bar.
+ * Full screen WebView plus a slim toolbar.
  *
- * The hint bar is drawn on top of the page because the Doubao web login is designed for a phone:
- * on a TV nobody knows whether to scan or type, there is no obvious "back" affordance in the page,
- * and a stuck poll has to become visible somewhere.
+ * The toolbar keeps the affordances a web page cannot provide: an explicit back button, a visible
+ * "still working" progress bar while the poller is waiting, and a retry button once the poller
+ * gave up.
  */
 @Composable
 private fun LoginScreen(
     phase: LoginPhase,
     backLabel: String,
+    titleLabel: String,
     retryLabel: String,
     onBack: () -> Unit,
     onRetry: () -> Unit,
     onWebViewReady: (WebView) -> Unit,
     onWebViewUnavailable: () -> Unit,
 ) {
-    // One APK adapts to portrait phones: below 600 dp stack the toolbar instead of placing a
-    // weight(1f) text column between two buttons (which overflows at 360 dp). safeDrawing keeps
-    // the toolbar clear of the translucent system bars the TV theme enables.
-    val compact = LocalConfiguration.current.smallestScreenWidthDp < 600
-
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MurmurColors.Background)
-            .then(if (compact) Modifier.safeDrawingPadding() else Modifier),
+            .safeDrawingPadding(),
     ) {
-        if (compact) {
-            // Single row: buttons inline with the hint. The stacked block this replaced was tall
-            // enough to push the WebView (the actual login page) off a small phone viewport.
-            Column {
-                Row(
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = onBack) {
+                Text(text = backLabel, color = MurmurColors.Accent, fontSize = 14.sp)
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            Text(
+                text = titleLabel,
+                color = MurmurColors.OnBackground,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            when (phase) {
+                LoginPhase.Waiting -> LinearProgressIndicator(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TvActionButton(text = backLabel, onClick = onBack)
-                    if (phase == LoginPhase.Expired) {
-                        TvActionButton(text = retryLabel, onClick = onRetry)
-                    }
-                    Text(
-                        text = phaseHint(phase),
-                        color = MurmurColors.OnSurface,
-                        fontSize = 14.sp,
-                        maxLines = 1,
-                    )
+                        .padding(end = 12.dp)
+                        .width(48.dp),
+                    color = MurmurColors.Accent,
+                    trackColor = MurmurColors.Outline,
+                )
+                LoginPhase.Expired -> TextButton(onClick = onRetry) {
+                    Text(text = retryLabel, color = MurmurColors.Accent, fontSize = 14.sp)
                 }
-                if (phase == LoginPhase.WebViewUnavailable) {
-                    // Concrete next step for the operator; a phone has a paste UI, but the adb
-                    // command is still the fastest way to diagnose a missing WebView provider.
-                    Text(
-                        text = "adb shell dumpsys webviewupdate",
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                        color = MurmurColors.OnSurfaceMuted,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                }
+                LoginPhase.WebViewUnavailable -> Spacer(modifier = Modifier.width(48.dp))
             }
-        } else {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 32.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TvActionButton(text = backLabel, onClick = onBack)
-                Spacer(modifier = Modifier.width(24.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = phaseHint(phase),
-                        color = MurmurColors.OnSurface,
-                        fontSize = 16.sp,
-                    )
-                    if (phase == LoginPhase.WebViewUnavailable) {
-                        // Concrete next step for the operator; a TV has no paste UI, so this is meant
-                        // to be read off the screen.
-                        Text(
-                            text = "adb shell dumpsys webviewupdate",
-                            color = MurmurColors.OnSurfaceMuted,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                    }
-                }
-                if (phase == LoginPhase.Expired) {
-                    // Only after the poller gave up, and never auto-hidden again.
-                    Spacer(modifier = Modifier.width(16.dp))
-                    TvActionButton(text = retryLabel, onClick = onRetry)
-                }
-            }
+        }
+        if (phase == LoginPhase.Expired || phase == LoginPhase.WebViewUnavailable) {
+            Text(
+                text = phaseHint(phase),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                color = MurmurColors.OnSurfaceMuted,
+                fontSize = 13.sp,
+            )
         }
         AndroidView(
             // The factory runs once; configuration and the initial loadUrl happen inside
@@ -567,7 +559,7 @@ private fun LoginScreen(
                 try {
                     WebView(context).also(onWebViewReady)
                 } catch (e: RuntimeException) {
-                    // No WebView provider: show the hint bar over a blank surface instead of a
+                    // No WebView provider: show the toolbar over a blank surface instead of a
                     // white screen or a crash.
                     onWebViewUnavailable()
                     View(context)

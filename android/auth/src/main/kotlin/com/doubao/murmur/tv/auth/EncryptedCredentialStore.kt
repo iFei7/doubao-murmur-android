@@ -29,9 +29,12 @@ import org.json.JSONObject
  * `load()` reports "not logged in" instead of throwing - a crash loop on startup would be worse
  * than asking the user to log in again.
  *
- * Preferences are opened per operation rather than cached: after [clear] the on-disk file is
- * rewritten behind the scenes, and a cached `SharedPreferences` instance would keep serving the
- * previous in-memory values.
+ * Preferences are opened once and cached for the lifetime of the store. [EncryptedSharedPreferences.create]
+ * unseals the Keystore master key and rebuilds the whole wrapper, which takes tens to hundreds of
+ * milliseconds - noticeable every time the IME re-reads the session while an input field gains
+ * focus. The cache is invalidated by [wipe]: clearing the file rewrites it behind the scenes, and
+ * a cached wrapper would keep serving the previous in-memory values, so the next operation opens
+ * a fresh instance.
  */
 class EncryptedCredentialStore(private val context: Context) : CredentialStore {
 
@@ -40,6 +43,10 @@ class EncryptedCredentialStore(private val context: Context) : CredentialStore {
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
     }
+
+    /** Cached encrypted preferences; guarded by [openPreferences]'s synchronized block. */
+    @Volatile
+    private var cachedPreferences: SharedPreferences? = null
 
     override suspend fun load(): AsrCredentials? = withContext(Dispatchers.IO) {
         try {
@@ -77,13 +84,18 @@ class EncryptedCredentialStore(private val context: Context) : CredentialStore {
 
     override suspend fun isLoggedIn(): Boolean = load() != null
 
-    private fun openPreferences(): SharedPreferences = EncryptedSharedPreferences.create(
-        context,
-        PREF_FILE_NAME,
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    private fun openPreferences(): SharedPreferences {
+        cachedPreferences?.let { return it }
+        return synchronized(this) {
+            cachedPreferences ?: EncryptedSharedPreferences.create(
+                context,
+                PREF_FILE_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+            ).also { cachedPreferences = it }
+        }
+    }
 
     /**
      * Deletes the stored blob through a plain (non-encrypted) handle on the same file.
@@ -92,6 +104,7 @@ class EncryptedCredentialStore(private val context: Context) : CredentialStore {
      * Keystore key is gone, and the encrypted wrapper would fail on the very same key.
      */
     private fun wipe() {
+        cachedPreferences = null
         try {
             context.getSharedPreferences(PREF_FILE_NAME, Context.MODE_PRIVATE)
                 .edit()

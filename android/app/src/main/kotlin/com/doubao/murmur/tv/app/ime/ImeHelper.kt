@@ -54,11 +54,11 @@ object ImeHelper {
     /**
      * Opens our own input-method settings screen, which lives in `:ime` in the same APK.
      *
-     * Preferred over the system screens on TV: it explains both setup steps, exposes the "switch
-     * back to the system keyboard" escape hatch, offers sign-out, and prints the `adb` lines. A
-     * good share of TV ROMs either lack `ACTION_INPUT_METHOD_SETTINGS` entirely or bury the
-     * keyboard list somewhere a viewer will never find, so this page is the reliable entry point
-     * and the system intents are the fallback, not the other way round.
+     * Preferred over the system screens: it explains both setup steps, exposes the "switch back
+     * to the system keyboard" escape hatch and offers sign-out. A good share of ROMs either lack
+     * `ACTION_INPUT_METHOD_SETTINGS` entirely or bury the keyboard list somewhere a user will
+     * never find, so this page is the reliable entry point and the system intents are the
+     * fallback, not the other way round.
      */
     fun openOwnImeSettings(context: Context): Boolean =
         startSafely(context, Intent(context, ImeSettingsActivity::class.java))
@@ -66,9 +66,9 @@ object ImeHelper {
     /**
      * Opens the system keyboard settings screen.
      *
-     * `ACTION_INPUT_METHOD_SETTINGS` is missing on a fair number of TV ROMs (it is an optional
+     * `ACTION_INPUT_METHOD_SETTINGS` is missing on a fair number of ROMs (it is an optional
      * AOSP screen), so falling back to the root settings entry keeps the user unblocked. The
-     * returned flag lets the caller show the `adb` hint instead of pretending something opened.
+     * returned flag lets the caller show an error hint instead of pretending something opened.
      */
     fun openImeSettings(context: Context): Boolean =
         startSafely(context, Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) ||
@@ -92,17 +92,6 @@ object ImeHelper {
             // Some vendor ROMs throw when the picker dialog cannot be hosted.
             false
         }
-    }
-
-    /**
-     * Two `adb` lines that enable and select our IME without any settings UI.
-     *
-     * This is the escape hatch for boxes whose settings app has no keyboard screen at all; the
-     * diagnostics screen shows it verbatim so it can be copied over `adb connect`.
-     */
-    fun adbHint(packageName: String = IME_PACKAGE): String {
-        val component = "$packageName/$IME_CLASS"
-        return "adb shell ime enable $component\nadb shell ime set $component"
     }
 
     /**

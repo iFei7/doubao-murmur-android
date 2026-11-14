@@ -13,31 +13,19 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
-    <!--
-      TV first: keep the LEANBACK_LAUNCHER entry for TV channels, but declare the leanback feature
-      optional. required="true" makes Play filter the app out on phones, so one APK must not require
-      it to stay installable on a portrait phone.
-    -->
-    <uses-feature
-        android:name="android.software.leanback"
-        android:required="false" />
     <uses-feature
         android:name="android.hardware.touchscreen"
         android:required="false" />
     <!--
-      A microphone is not mandatory: TVs may ship an external USB or Bluetooth microphone that is
-      probed at runtime (see MicProbe in :audio).
+      A microphone is not mandatory: some devices ship an external USB or Bluetooth microphone
+      that is probed at runtime (see MicProbe in :audio).
     -->
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="false" />
-    <uses-feature
-        android:name="android.hardware.gamepad"
-        android:required="false" />
 
     <application
         android:allowBackup="true"
-        android:banner="@drawable/tv_banner"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true"
         android:fullBackupContent="@xml/backup_rules"
@@ -53,12 +41,6 @@
             android:name="com.doubao.murmur.tv.app.MainActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|uiMode"
             android:exported="true">
-            <!-- Leanback launcher entry point. -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
-            </intent-filter>
-            <!-- Plain launcher entry so the app also shows up on AOSP/phone-style launchers. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -75,10 +57,6 @@
             android:exported="false"
             android:noHistory="true"
             android:theme="@style/Theme.MurmurTv.Translucent" />
-
-        <activity
-            android:name="com.doubao.murmur.tv.app.diagnostics.DiagnosticsActivity"
-            android:exported="false" />
 
     </application>
 

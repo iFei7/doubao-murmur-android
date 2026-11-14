@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  TV theme: dark, edge-to-edge, no action bar. Compose draws its own surfaces on top of
-  windowBackground, so the window colour only shows during startup.
+  App theme: dark window background, edge-to-edge, no action bar. Compose draws its own surfaces
+  on top of windowBackground, so the window colour only shows during startup. Activities call
+  enableEdgeToEdge(), which manages the status/navigation bar appearance at runtime - the
+  deprecated windowTranslucentStatus/Navigation flags were removed.
 -->
 <resources>
 
@@ -10,13 +12,11 @@
         <item name="android:colorBackground">#FF0B0B0F</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
-        <item name="android:windowTranslucentStatus">true</item>
-        <item name="android:windowTranslucentNavigation">true</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
         <!-- android:windowLightNavigationBar is intentionally absent: it needs API 27 (minSdk 23)
-             and is meaningless on a TV, where the leanback UI runs fullscreen with no system nav bar. -->
+             and enableEdgeToEdge() sets the light navigation bar icons at runtime when needed. -->
     </style>
 
     <!-- Transparent host used by MicPermissionActivity so the rationale does not flash a
