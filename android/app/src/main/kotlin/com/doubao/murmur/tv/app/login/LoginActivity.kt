@@ -22,7 +22,6 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -200,18 +199,6 @@ class LoginActivity : ComponentActivity() {
         try {
             webView = view
 
-            // Diagnostics: the provider build and the actual UA the WebView will send. The UA is
-            // deliberately the default one (see the settings block below); logging it makes the
-            // UA-based page-serving differences visible in a bug report.
-            runCatching {
-                val provider = packageManager.getPackageInfo(WEBVIEW_PROVIDER_PACKAGE, 0)
-                Log.i(
-                    TAG,
-                    "WebView provider: $WEBVIEW_PROVIDER_PACKAGE ${provider.versionName}; " +
-                        "UA=${WebSettings.getDefaultUserAgent(this)}",
-                )
-            }
-
             view.settings.apply {
                 // Without JS the Doubao login page does not render at all.
                 javaScriptEnabled = true
@@ -223,8 +210,26 @@ class LoginActivity : ComponentActivity() {
                 allowContentAccess = false
                 javaScriptCanOpenWindowsAutomatically = false
                 setGeolocationEnabled(false)
-                // userAgentString is deliberately left at the default: Doubao serves different
-                // pages (and different login flows) when the UA does not look like a WebView.
+                // Desktop UA on purpose. The upstream desktop client logs in through a desktop
+                // WebView (pywebview) with a non-mobile UA, and that flow is verified to work;
+                // v0.2.2 showed the default Android WebView UA (which carries the "Android; wv"
+                // tokens) reaching an HTTP-200 page that renders blank - evidence that Doubao
+                // serves a different, TV-unfriendly page when the UA looks like a mobile WebView.
+                // The v0.2.2 diagnostics (Page finished URL + JS console) verify the branch
+                // hypothesis either way; if the logs show Doubao rejecting the desktop UA
+                // (e.g. passport refusing it), revisit this line before falling back.
+                userAgentString = DESKTOP_LOGIN_UA
+            }
+
+            // Diagnostics: the provider build and the actual UA the WebView will send. Logged
+            // after the settings block so the line shows the UA that is actually in effect.
+            runCatching {
+                val provider = packageManager.getPackageInfo(WEBVIEW_PROVIDER_PACKAGE, 0)
+                Log.i(
+                    TAG,
+                    "WebView provider: $WEBVIEW_PROVIDER_PACKAGE ${provider.versionName}; " +
+                        "UA=${view.settings.userAgentString}",
+                )
             }
 
             CookieManager.getInstance().apply {
@@ -624,6 +629,15 @@ class LoginActivity : ComponentActivity() {
     companion object {
 
         private const val BRIDGE_NAME = "MurmurBridge"
+
+        /**
+         * Desktop Chrome UA for the login WebView. Real desktop Chrome 131 string: no
+         * Android/wv/Mobile tokens, so Doubao serves the same desktop login page the upstream
+         * desktop client (pywebview) is verified against. See the settings block in
+         * [attachWebView] for the reasoning and the fallback plan.
+         */
+        private const val DESKTOP_LOGIN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         private const val PAGE_SETTLE_DELAY_MS = 1_500L
 
