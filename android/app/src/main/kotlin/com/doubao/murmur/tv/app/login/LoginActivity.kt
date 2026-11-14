@@ -11,6 +11,7 @@ import android.net.http.SslError
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Message
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
@@ -25,6 +26,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
@@ -64,6 +66,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.tv.material3.Text
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import androidx.lifecycle.lifecycleScope
 import com.doubao.murmur.tv.app.AppGraph
 import com.doubao.murmur.tv.app.R
@@ -112,7 +116,43 @@ class LoginActivity : ComponentActivity() {
      */
     private val saveCheck = Runnable { checkLoginFlagThenSave() }
 
+    /**
+     * Route 2 of the login detection (upstream macOS `decidePolicyFor`): extraction straight
+     * from the `from_login=1` URL marker, without the [checkLoginFlagThenSave] localStorage
+     * gate. The upstream desktop clients treat the marker as login proof on its own - and
+     * `flow_web_has_login` is a key none of them ever read. The extractor's own session-cookie
+     * criterion still keeps a pre-login cookie jar out.
+     */
+    private val directSaveCheck = Runnable { attemptSave() }
+
+    /** Route 3: DOM fallback probe, scheduled [DOM_LOGIN_CHECK_DELAY_MS] after page-finished. */
+    private val domLoginCheck = Runnable { runDomLoginFallback() }
+
+    /**
+     * The login WebView, **pre-created** as an activity field and only *wrapped* by the Compose
+     * `AndroidView` factory (see [LoginScreen]): on some devices - OnePlus KB2003 / Android 14
+     * verified on v0.2.7 - a WebView constructed inside the `AndroidView` factory never paints,
+     * while the same instance inside a plain `FrameLayout` renders fine. That is the community
+     * workaround for the Compose `AndroidView` white-screen bug (SO #78482022), the same shape
+     * the IME's Compose+FrameLayout container already uses.
+     *
+     * The instance is fully prepared before it is ever attached: settings, desktop UA, clients,
+     * the document-start injected login detector and the initial `loadUrl` all happen in
+     * [configureLoginWebView]; the factory only adds the finished view to a `FrameLayout`.
+     */
     private var webView: WebView? = null
+
+    /** Set once [ensureLoginWebView] proved there is no usable WebView provider on this ROM. */
+    private var webViewUnavailable = false
+
+    /**
+     * Throwaway WebViews created by the popup fallback ([WebChromeClient.onCreateWindow]) to
+     * surface a `window.open` target URL. They are never attached to a window; they are
+     * destroyed as soon as the URL has been handed to the main WebView, and anything left over
+     * is destroyed in [onDestroy].
+     */
+    private val popupWebViews = mutableListOf<WebView>()
+
     private var saveInFlight = false
     private var signedIn = false
 
@@ -147,7 +187,8 @@ class LoginActivity : ComponentActivity() {
     /**
      * Bumped when the current WebView died (render process gone): the AndroidView node is keyed
      * on this, so a bump tears down the dead instance and recreates the WebView from scratch
-     * (factory -> attachWebView -> loadUrl) through recomposition.
+     * (factory -> [ensureLoginWebView] -> fresh, fully configured instance) through
+     * recomposition.
      */
     private var webViewEpoch by mutableIntStateOf(0)
 
@@ -165,7 +206,7 @@ class LoginActivity : ComponentActivity() {
     /**
      * True once the self-test proved that hardware rendering is broken on this ROM and switched
      * the WebView to [View.LAYER_TYPE_SOFTWARE]. Applied to every WebView (re)built by
-     * [attachWebView], so the fix survives a render-process rebuild for the whole session.
+     * [configureLoginWebView], so the fix survives a render-process rebuild for the whole session.
      */
     private var softwareRendering = false
 
@@ -270,6 +311,10 @@ class LoginActivity : ComponentActivity() {
                     // WebView (rebuilt instances included) without storing a view in Compose
                     // state - writing state from the AndroidView factory can re-enter composition.
                     webViewProvider = { webView },
+                    // The pre-created-instance accessor (see [ensureLoginWebView]): the
+                    // factory wraps whatever this returns in a FrameLayout, it never builds a
+                    // WebView itself (white-screen workaround).
+                    provideWebView = ::ensureLoginWebView,
                     backLabel = stringResource(R.string.action_back),
                     titleLabel = stringResource(R.string.login_title),
                     retryLabel = stringResource(R.string.login_action_retry),
@@ -281,8 +326,6 @@ class LoginActivity : ComponentActivity() {
                     onRetry = ::onRetryClicked,
                     onOpenInBrowser = ::openInBrowser,
                     onOpenSystemBrowser = ::openInCustomTabs,
-                    onWebViewReady = ::attachWebView,
-                    onWebViewUnavailable = ::markWebViewUnavailable,
                 )
             }
         }
@@ -290,13 +333,21 @@ class LoginActivity : ComponentActivity() {
         // The back gesture/gesture bar walks back through the WebView history (e.g. out of a wrong
         // QR page, back to the entry page) - but only while there is history to walk AND the login
         // has not succeeded yet (see [updateBackState]). Whenever the callback is disabled the
-        // system default applies, which finishes the activity.
+        // system default applies, which finishes the activity. Assigned *before* the WebView is
+        // created: configureLoginWebView calls updateBackState, which reads the callback.
         backCallback = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() {
                 webView?.goBack()
             }
         }
         onBackPressedDispatcher.addCallback(this, backCallback)
+
+        // Pre-create the login WebView *outside* composition: a WebView built inside an
+        // AndroidView factory never paints on some devices (OnePlus KB2003 / Android 14
+        // verified on v0.2.7), while the same pre-created instance wrapped in a FrameLayout
+        // does - see [ensureLoginWebView] and the LoginScreen factory comment. The call also
+        // surfaces a missing WebView provider before the first frame is composed.
+        ensureLoginWebView()
     }
 
     /**
@@ -317,196 +368,386 @@ class LoginActivity : ComponentActivity() {
             view.copyBackForwardList().size <= MAX_BACK_HISTORY
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun attachWebView(view: WebView) {
-        try {
-            webView = view
-
-            view.settings.apply {
-                // Without JS the Doubao login page does not render at all.
-                javaScriptEnabled = true
-                // device_id / web_id live in localStorage, the socket URL needs them.
-                domStorageEnabled = true
-                databaseEnabled = true
-                // Nothing in this flow needs local files or content providers; keep it minimal.
-                allowFileAccess = false
-                allowContentAccess = false
-                javaScriptCanOpenWindowsAutomatically = false
-                setGeolocationEnabled(false)
-                // Default (Android) UA on purpose. The v0.2.3 desktop-UA experiment is reverted:
-                // the v0.2.6 on-device panel showed the page's JS/DOM working under the desktop
-                // UA while the screen still stayed blank for the user, and the user's own mobile
-                // browser (Android 14, Mobile Chrome) is verified to open the Doubao mobile OAuth
-                // login page and sign in successfully - so stay on the verified mobile path.
-                // The desktop UA is the upstream desktop client's (pywebview) untested route.
-            }
-
-            // If the render self-test proved hardware compositing broken on this ROM (GPU
-            // compositing blank-screen is common on some vendor ROMs), keep every WebView - a
-            // rebuilt one included - on the software layer for this session. Applied after the
-            // settings block so a fresh instance inherits the verdict immediately.
-            if (softwareRendering) {
-                view.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-            }
-
-            // Diagnostics: the provider build and the actual UA the WebView will send. Logged
-            // after the settings block so the line shows the UA that is actually in effect.
-            runCatching {
-                val provider = packageManager.getPackageInfo(WEBVIEW_PROVIDER_PACKAGE, 0)
-                Log.i(
-                    TAG,
-                    "WebView provider: $WEBVIEW_PROVIDER_PACKAGE ${provider.versionName}; " +
-                        "UA=${view.settings.userAgentString}",
-                )
-            }
-
-            CookieManager.getInstance().apply {
-                setAcceptCookie(true)
-                // API 21+; the login round trip bounces through passport.doubao.com, so third
-                // party cookies are mandatory for the session to survive the redirect chain.
-                setAcceptThirdPartyCookies(view, true)
-            }
-
-            view.webChromeClient = object : WebChromeClient() {
-                override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                    // A blank page is usually a JS failure that never reaches any error callback;
-                    // the console is the only window into it.
-                    val line = "${consoleMessage.message()} " +
-                        "(${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})"
-                    when (consoleMessage.messageLevel()) {
-                        ConsoleMessage.MessageLevel.ERROR -> Log.w(TAG, "JS console error: $line")
-                        ConsoleMessage.MessageLevel.WARNING -> Log.w(TAG, "JS console warn: $line")
-                        else -> Log.d(TAG, "JS console: $line")
-                    }
-                    return false
-                }
-            }
-
-            view.webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-                    super.onPageStarted(view, url, favicon)
-                    Log.i(TAG, "Page started: $url")
-                }
-
-                override fun onPageFinished(view: WebView, url: String?) {
-                    super.onPageFinished(view, url)
-                    Log.i(TAG, "Page finished: $url")
-                    diagPageFinishedCount += 1
-                    diagLastFinishedUrl = sanitizeUrlForDiagnostics(url)
-                    // The history shape changed; BACK may gain or lose its page-navigation role.
-                    updateBackState()
-                    // Start the localStorage poll on every navigation; the script is idempotent.
-                    view.evaluateJavascript(LOGIN_POLL_JS, null)
-
-                    // Re-arm the blank-page watchdog (once per page; see [blankCheck]).
-                    blankCheckDone = false
-                    mainHandler.removeCallbacks(blankCheck)
-                    mainHandler.removeCallbacks(blankProbeTimeout)
-                    diagBlankProbe = BLANK_PROBE_NOT_RUN
-                    if (!signedIn) {
-                        mainHandler.postDelayed(blankCheck, BLANK_CHECK_DELAY_MS)
-                    }
-
-                    // passport.doubao.com and the SSO hops still carry pre-login cookies, so
-                    // reading the jar there would store a dead session. Only Doubao pages that are
-                    // not part of the login round trip are worth a check - and even then the
-                    // extraction only runs once the page itself says the user signed in (see
-                    // [checkLoginFlagThenSave]).
-                    if (url == null || !DoubaoLoginUrl.isSessionCheckCandidate(url)) {
-                        return
-                    }
-                    mainHandler.removeCallbacks(saveCheck)
-                    val delay = if (url.contains(FROM_LOGIN_MARKER)) 0L else PAGE_SETTLE_DELAY_MS
-                    mainHandler.postDelayed(saveCheck, delay)
-                }
-
-                override fun onReceivedError(
-                    view: WebView,
-                    request: WebResourceRequest,
-                    error: WebResourceError,
-                ) {
-                    super.onReceivedError(view, request, error)
-                    if (!request.isForMainFrame) {
-                        // A broken script, image or XHR must not block the login flow.
-                        Log.w(TAG, "Subresource error: ${error.description}")
-                        return
-                    }
-                    Log.w(TAG, "Main frame error: ${error.description}")
-                    showLoadError(error.description?.toString())
-                }
-
-                override fun onReceivedHttpError(
-                    view: WebView,
-                    request: WebResourceRequest,
-                    errorResponse: WebResourceResponse,
-                ) {
-                    super.onReceivedHttpError(view, request, errorResponse)
-                    if (!request.isForMainFrame) {
-                        return
-                    }
-                    val code = errorResponse.statusCode
-                    if (code < HTTP_ERROR_MIN) {
-                        // Redirects (3xx) are followed transparently by the WebView.
-                        return
-                    }
-                    Log.w(TAG, "Main frame HTTP error $code")
-                    showLoadError("HTTP $code")
-                }
-
-                override fun onReceivedSslError(
-                    view: WebView,
-                    handler: SslErrorHandler,
-                    error: SslError,
-                ) {
-                    // Never proceed past an invalid certificate: this flow harvests the session
-                    // cookies, so a MITM must not be waved through. The callback carries no
-                    // request info, so whether the failing resource is the main frame or a
-                    // subresource cannot be told here - treat it as a page failure either way.
-                    Log.w(TAG, "SSL error: ${error.primaryError}")
-                    runCatching { handler.cancel() }
-                    if (!signedIn) {
-                        errorHint = getString(R.string.login_error_ssl)
-                        phase = LoginPhase.LoadFailed
-                    }
-                }
-
-                override fun onRenderProcessGone(
-                    view: WebView,
-                    detail: RenderProcessGoneDetail,
-                ): Boolean {
-                    Log.w(TAG, "WebView render process gone; rebuilding")
-                    diagRenderGoneCount += 1
-                    // The framework requires the dead WebView to be torn down rather than used.
-                    // A fresh one is created by bumping [webViewEpoch]: the AndroidView node is
-                    // recreated, its factory runs attachWebView again, and the login URL is
-                    // loaded from scratch. Returning true tells the system the app handled it.
-                    runCatching {
-                        view.stopLoading()
-                        (view.parent as? ViewGroup)?.removeView(view)
-                        view.webViewClient = WebViewClient()
-                        view.destroy()
-                    }
-                    webView = null
-                    webViewEpoch += 1
-                    return true
-                }
-            }
-
-            view.addJavascriptInterface(
-                LoginBridge(
-                    onDetected = { runOnUiThread { attemptSave() } },
-                    onExpired = { runOnUiThread { onLoginPollExpired() } },
-                ),
-                BRIDGE_NAME,
-            )
-            view.loadUrl(DoubaoLoginUrl.LOGIN_URL)
-            updateBackState()
+    /**
+     * Returns the pre-created login WebView, creating it on first use. Called once from
+     * [onCreate] (outside composition - the white-screen workaround) and from the LoginScreen
+     * factory, so a render-process rebuild ([webViewEpoch]) also reaches a fresh, fully
+     * configured instance through the same path.
+     *
+     * Returns `null` - and flips the screen to [LoginPhase.WebViewUnavailable] - on a ROM
+     * without a usable WebView provider; the verdict is sticky, a provider cannot appear
+     * mid-session.
+     */
+    private fun ensureLoginWebView(): WebView? {
+        webView?.let { return it }
+        if (webViewUnavailable) {
+            return null
+        }
+        val view = try {
+            WebView(this)
         } catch (e: RuntimeException) {
-            // A ROM without a usable WebView provider throws on the first settings or
-            // CookieManager call as well, not only on construction. Drop the half-built view so
-            // a later attempt cannot touch it.
-            webView = null
+            Log.w(TAG, "WebView provider unavailable (construction failed)")
+            webViewUnavailable = true
             markWebViewUnavailable()
+            return null
+        }
+        // Assign before configuring: the clients below read [webView] (updateBackState et al.).
+        webView = view
+        return try {
+            configureLoginWebView(view)
+            view
+        } catch (e: RuntimeException) {
+            // A ROM without a usable WebView provider also throws on the first settings or
+            // CookieManager call, not only on construction. Drop the half-built view so a
+            // later attempt cannot touch it.
+            runCatching { view.destroy() }
+            webView = null
+            webViewUnavailable = true
+            markWebViewUnavailable()
+            null
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun configureLoginWebView(view: WebView) {
+        // Document-start injection (upstream parity: all three desktop clients inject their
+        // login detector at document start - macOS/Linux WKUserScript .atDocumentStart, Windows
+        // Tauri initialization_script). androidx.webkit backports the API to the Chrome WebView
+        // provider; when the provider predates it, the injection degrades to onPageStarted
+        // below (slightly later, same semantics).
+        val documentStartActive = runCatching {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                WebViewCompat.addDocumentStartJavaScript(
+                    view,
+                    DOCUMENT_START_LOGIN_JS,
+                    setOf(DOCUMENT_START_ORIGIN_RULE),
+                )
+                true
+            } else {
+                false
+            }
+        }.getOrDefault(false)
+        if (!documentStartActive) {
+            Log.w(TAG, "Document-start injection unsupported; degrading to onPageStarted")
+        }
+
+        view.settings.apply {
+            // Without JS the Doubao login page does not render at all.
+            javaScriptEnabled = true
+            // device_id / web_id live in localStorage, the socket URL needs them.
+            domStorageEnabled = true
+            databaseEnabled = true
+            // Nothing in this flow needs local files or content providers; keep it minimal.
+            allowFileAccess = false
+            allowContentAccess = false
+            // Login popups (doubao.com opens its login helpers with window.open) must reach
+            // onCreateWindow, which loads them into this WebView - the upstream macOS route
+            // (WKUIDelegate.createWebViewWith: load the request into the current WebView).
+            javaScriptCanOpenWindowsAutomatically = true
+            setSupportMultipleWindows(true)
+            setGeolocationEnabled(false)
+            // Desktop UA, upstream-verified: all three desktop clients load doubao.com/chat
+            // with a desktop Chrome UA (macOS Chrome/146, Windows Chrome/126) and the page
+            // renders and signs in - see DESKTOP_LOGIN_UA. The v0.2.6 revert comment (mobile
+            // UA on purpose) is superseded: the v0.2.7 blank screen was the AndroidView
+            // factory bug above, not a UA problem.
+            userAgentString = DESKTOP_LOGIN_UA
+        }
+
+        // If the render self-test proved hardware compositing broken on this ROM (GPU
+        // compositing blank-screen is common on some vendor ROMs), keep every WebView - a
+        // rebuilt one included - on the software layer for this session. Applied after the
+        // settings block so a fresh instance inherits the verdict immediately.
+        if (softwareRendering) {
+            view.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+        }
+
+        // Diagnostics: the provider build and the actual UA the WebView will send. Logged
+        // after the settings block so the line shows the UA that is actually in effect.
+        runCatching {
+            val provider = packageManager.getPackageInfo(WEBVIEW_PROVIDER_PACKAGE, 0)
+            Log.i(
+                TAG,
+                "WebView provider: $WEBVIEW_PROVIDER_PACKAGE ${provider.versionName}; " +
+                    "UA=${view.settings.userAgentString}",
+            )
+        }
+
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            // API 21+; the login round trip bounces through passport.doubao.com, so third
+            // party cookies are mandatory for the session to survive the redirect chain.
+            setAcceptThirdPartyCookies(view, true)
+        }
+
+        view.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                // A blank page is usually a JS failure that never reaches any error callback;
+                // the console is the only window into it.
+                val line = "${consoleMessage.message()} " +
+                    "(${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})"
+                when (consoleMessage.messageLevel()) {
+                    ConsoleMessage.MessageLevel.ERROR -> Log.w(TAG, "JS console error: $line")
+                    ConsoleMessage.MessageLevel.WARNING -> Log.w(TAG, "JS console warn: $line")
+                    else -> Log.d(TAG, "JS console: $line")
+                }
+                return false
+            }
+
+            override fun onCreateWindow(
+                view: WebView,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message,
+            ): Boolean {
+                // Popup fallback, upstream macOS parity (WKUIDelegate.createWebViewWith):
+                // doubao.com opens its login helpers with window.open, which Android would
+                // otherwise turn into a second window this TV flow has nowhere to show. The
+                // upstream loads the popup request into the *current* WebView; Android does not
+                // hand out the popup URL here, so a throwaway WebView accepts the transport
+                // just long enough to surface the target URL.
+                val transport = (resultMsg.obj as? WebView.WebViewTransport) ?: return false
+                var redirected = false
+                val popup = WebView(view.context)
+                popup.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        v: WebView,
+                        request: WebResourceRequest,
+                    ): Boolean {
+                        if (!redirected) {
+                            redirected = true
+                            loadPopupRequestIntoMainWebView(request.url?.toString(), popup)
+                        }
+                        return true
+                    }
+
+                    override fun onPageStarted(v: WebView, url: String?, favicon: Bitmap?) {
+                        super.onPageStarted(v, url, favicon)
+                        // Some providers skip shouldOverrideUrlLoading for the very first
+                        // navigation of a transport WebView; the page-started callback still
+                        // carries the URL.
+                        if (!redirected) {
+                            redirected = true
+                            loadPopupRequestIntoMainWebView(url, popup)
+                        }
+                    }
+                }
+                transport.webView = popup
+                resultMsg.sendToTarget()
+                popupWebViews.add(popup)
+                return true
+            }
+        }
+
+        view.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                Log.i(TAG, "Page started: $url")
+                if (!documentStartActive && url != null &&
+                    DoubaoLoginUrl.isSessionCheckCandidate(url)
+                ) {
+                    // Degraded injection: the WebView provider predates document-start scripts,
+                    // so the login detector lands here instead - slightly later, same script,
+                    // same semantics. Calls the page fired before this point are missed, which
+                    // only delays detection (the DOM fallback and the URL marker still fire).
+                    Log.i(TAG, "Injecting the login detector via onPageStarted (degraded)")
+                    view.evaluateJavascript(DOCUMENT_START_LOGIN_JS, null)
+                }
+            }
+
+            override fun onPageFinished(view: WebView, url: String?) {
+                super.onPageFinished(view, url)
+                Log.i(TAG, "Page finished: $url")
+                diagPageFinishedCount += 1
+                diagLastFinishedUrl = sanitizeUrlForDiagnostics(url)
+                // The history shape changed; BACK may gain or lose its page-navigation role.
+                updateBackState()
+                // Auxiliary localStorage poll on every navigation (kept from v0.2.7 as a
+                // safety net; upstream never read `flow_web_has_login`, so it is no longer the
+                // primary criterion - the document-start profile-API interception is).
+                view.evaluateJavascript(LOGIN_POLL_JS, null)
+
+                // Re-arm the blank-page watchdog (once per page; see [blankCheck]).
+                blankCheckDone = false
+                mainHandler.removeCallbacks(blankCheck)
+                mainHandler.removeCallbacks(blankProbeTimeout)
+                diagBlankProbe = BLANK_PROBE_NOT_RUN
+                if (!signedIn) {
+                    mainHandler.postDelayed(blankCheck, BLANK_CHECK_DELAY_MS)
+                }
+
+                // passport.doubao.com and the SSO hops still carry pre-login cookies, so
+                // reading the jar there would store a dead session. Only Doubao pages that are
+                // not part of the login round trip are worth a check.
+                if (url == null || !DoubaoLoginUrl.isSessionCheckCandidate(url)) {
+                    return
+                }
+                mainHandler.removeCallbacks(saveCheck)
+                mainHandler.removeCallbacks(directSaveCheck)
+                mainHandler.removeCallbacks(domLoginCheck)
+                if (url.contains(FROM_LOGIN_MARKER)) {
+                    // Route 2 (upstream macOS decidePolicyFor): the URL marker alone proves the
+                    // login round trip came back - no localStorage gate in front of it.
+                    mainHandler.postDelayed(directSaveCheck, 0L)
+                } else {
+                    mainHandler.postDelayed(saveCheck, PAGE_SETTLE_DELAY_MS)
+                }
+                // Route 3 (upstream macOS checkLoginState): if the "to login" button is still
+                // in the DOM after the page settled, nobody is signed in yet - surface it.
+                mainHandler.postDelayed(domLoginCheck, DOM_LOGIN_CHECK_DELAY_MS)
+            }
+
+            override fun onReceivedError(
+                view: WebView,
+                request: WebResourceRequest,
+                error: WebResourceError,
+            ) {
+                super.onReceivedError(view, request, error)
+                if (!request.isForMainFrame) {
+                    // A broken script, image or XHR must not block the login flow.
+                    Log.w(TAG, "Subresource error: ${error.description}")
+                    return
+                }
+                Log.w(TAG, "Main frame error: ${error.description}")
+                showLoadError(error.description?.toString())
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView,
+                request: WebResourceRequest,
+                errorResponse: WebResourceResponse,
+            ) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                if (!request.isForMainFrame) {
+                    return
+                }
+                val code = errorResponse.statusCode
+                if (code < HTTP_ERROR_MIN) {
+                    // Redirects (3xx) are followed transparently by the WebView.
+                    return
+                }
+                Log.w(TAG, "Main frame HTTP error $code")
+                showLoadError("HTTP $code")
+            }
+
+            override fun onReceivedSslError(
+                view: WebView,
+                handler: SslErrorHandler,
+                error: SslError,
+            ) {
+                // Never proceed past an invalid certificate: this flow harvests the session
+                // cookies, so a MITM must not be waved through. The callback carries no
+                // request info, so whether the failing resource is the main frame or a
+                // subresource cannot be told here - treat it as a page failure either way.
+                Log.w(TAG, "SSL error: ${error.primaryError}")
+                runCatching { handler.cancel() }
+                if (!signedIn) {
+                    errorHint = getString(R.string.login_error_ssl)
+                    phase = LoginPhase.LoadFailed
+                }
+            }
+
+            override fun onRenderProcessGone(
+                view: WebView,
+                detail: RenderProcessGoneDetail,
+            ): Boolean {
+                Log.w(TAG, "WebView render process gone; rebuilding")
+                diagRenderGoneCount += 1
+                // The framework requires the dead WebView to be torn down rather than used.
+                // A fresh one is created by bumping [webViewEpoch]: the AndroidView node is
+                // recreated, its factory calls [ensureLoginWebView] again, and the login
+                // URL is loaded from scratch. Returning true tells the system the app
+                // handled it.
+                runCatching {
+                    view.stopLoading()
+                    (view.parent as? ViewGroup)?.removeView(view)
+                    view.webViewClient = WebViewClient()
+                    view.destroy()
+                }
+                webView = null
+                webViewEpoch += 1
+                return true
+            }
+        }
+
+        view.addJavascriptInterface(
+            LoginBridge(
+                onDetected = { runOnUiThread { attemptSave() } },
+                onExpired = { runOnUiThread { onLoginPollExpired() } },
+                onLoginState = { loggedIn -> runOnUiThread { onLoginStateEvent(loggedIn) } },
+            ),
+            BRIDGE_NAME,
+        )
+        view.loadUrl(DoubaoLoginUrl.LOGIN_URL)
+        updateBackState()
+    }
+
+    /**
+     * Popup fallback (upstream macOS `WKUIDelegate.createWebViewWith` semantics): the
+     * `window.open` target is loaded into the *current* login WebView instead of a new window.
+     * The throwaway transport WebView is destroyed right after the handover; it was never
+     * attached to a window, so nothing was ever visible on it.
+     */
+    private fun loadPopupRequestIntoMainWebView(url: String?, popup: WebView) {
+        if (signedIn) {
+            return
+        }
+        if (url.isNullOrBlank()) {
+            Log.w(TAG, "Popup opened without a usable URL; ignoring")
+            return
+        }
+        Log.i(TAG, "Popup request loaded into the login WebView: ${sanitizeUrlForDiagnostics(url)}")
+        webView?.loadUrl(url)
+        updateBackState()
+        // Destroying the popup mid-callback would upset the navigation it is still reporting;
+        // a posted destroy is enough - the view was never attached, nothing on screen owns it.
+        mainHandler.post {
+            popupWebViews.remove(popup)
+            runCatching {
+                popup.stopLoading()
+                popup.webViewClient = WebViewClient()
+                popup.destroy()
+            }
+        }
+    }
+
+    /**
+     * Route 1 of the login detection: the verdict from the document-start interception of
+     * `/alice/profile/self` (upstream parity - macOS/Linux `inject-websocket.js`, Windows
+     * `login.rs` all classify exactly this API). `true` means the profile API answered with an
+     * authenticated profile, the strongest signal of the three routes, so the extraction starts
+     * immediately. `false` only logs: the page re-fires the API after each navigation, and the
+     * other routes own the user-visible wait states.
+     */
+    private fun onLoginStateEvent(loggedIn: Boolean) {
+        if (loggedIn) {
+            Log.i(TAG, "Profile API reports signed in; extracting credentials")
+            attemptSave()
+        } else {
+            Log.i(TAG, "Profile API reports signed out")
+        }
+    }
+
+    /**
+     * Route 3 of the login detection (upstream macOS `checkLoginState`): a `button
+     * [data-testid="to_login_button"]` still present in the DOM two seconds after the page
+     * settled is the page saying nobody is signed in. Only the hint is touched, and only while
+     * the screen is in a quiet wait - the user may simply not have started signing in yet, and
+     * a retry button that blinks in and out is worse than a progress bar on a 3 m screen.
+     */
+    private fun runDomLoginFallback() {
+        val view = webView ?: return
+        if (signedIn) {
+            return
+        }
+        view.evaluateJavascript(DOM_LOGIN_BUTTON_QUERY_JS) { raw ->
+            val loginButtonPresent = raw == "true"
+            Log.i(TAG, "DOM fallback: login button present=$loginButtonPresent")
+            if (loginButtonPresent && !signedIn && phase == LoginPhase.Waiting &&
+                errorHint.isBlank()
+            ) {
+                errorHint = getString(R.string.login_not_detected)
+            }
         }
     }
 
@@ -675,21 +916,23 @@ class LoginActivity : ComponentActivity() {
     }
 
     /**
-     * Blank-page verdict. Without a running self-test this now *starts* one instead of giving up:
-     * the login page is blank either because this ROM's WebView cannot render at all (hardware
-     * compositing blank-screen, common on vendor ROMs - fixable by switching to the software
-     * layer) or because the Doubao page itself refuses to render. Probing [RENDER_TEST_URL]
-     * tells the two apart; see [onBlankPageDetected]'s stage branches and [onRenderTestPageOk].
-     *
-     * With a self-test already running, the blank verdict belongs to the probe page: baidu.com
-     * blank under hardware rendering moves the test to its software-rendering round, blank under
-     * software rendering too ends the test with the "WebView itself is broken" verdict.
+     * Blank-page verdict. **v0.2.8: the two-stage render self-test (baidu probe / software
+     * layer) is demoted to diagnostics-only** - it no longer drives any user-visible state.
+     * The blank screen it was built to diagnose turned out to be the Compose `AndroidView`
+     * factory bug, fixed by the pre-created-WebView-inside-FrameLayout structure (see
+     * [LoginScreen]); the probe's own navigations would now only add confusion. The verdict is
+     * reported the plain v0.2.1 way (LoadFailed hint + retry) and the machine stays behind
+     * [RENDER_SELF_TEST_ENABLED] for on-device diagnosis.
      */
     private fun onBlankPageDetected(summary: String) {
         if (signedIn || phase != LoginPhase.Waiting) {
             return
         }
         Log.w(TAG, "Blank page detected: $summary")
+        if (!RENDER_SELF_TEST_ENABLED) {
+            showBlankPageError(summary)
+            return
+        }
         when (renderTestStage) {
             null -> startRenderSelfTest(summary)
             RenderTestStage.Baidu -> {
@@ -752,7 +995,7 @@ class LoginActivity : ComponentActivity() {
      *   to render. Back to the LoadFailed screen (retry + browser escape hatch) and reload the
      *   login URL to restore the poller semantics.
      * - [RenderTestStage.Software]: switching to the software layer fixed rendering - keep it
-     *   ([softwareRendering] stays true, so [attachWebView] applies it to any rebuilt WebView)
+     *   ([softwareRendering] stays true, so [configureLoginWebView] applies it to any rebuilt WebView)
      *   and reload the login URL, where the user signs in again as usual.
      */
     private fun onRenderTestPageOk() {
@@ -1132,6 +1375,14 @@ class LoginActivity : ComponentActivity() {
             customTabsBound = false
         }
         customTabsClient = null
+        popupWebViews.forEach { popup ->
+            runCatching {
+                popup.stopLoading()
+                popup.webViewClient = WebViewClient()
+                popup.destroy()
+            }
+        }
+        popupWebViews.clear()
         webView?.let { view ->
             (view.parent as? ViewGroup)?.removeView(view)
             view.stopLoading()
@@ -1167,6 +1418,24 @@ class LoginActivity : ComponentActivity() {
         /** Log tag for the WebView error paths. Only error codes and descriptions are logged. */
         private const val TAG = "LoginActivity"
 
+        /**
+         * Desktop Chrome UA, the combination verified by the upstream desktop clients:
+         * macOS ships Chrome/146, Windows Chrome/126, Linux the same shape - all three load
+         * `doubao.com/chat` with a desktop UA and the page renders and signs in (see the
+         * upstream audit). The WebView keeps this UA for the whole login round trip so the
+         * page stays on the same layout the upstream detection scripts were written against.
+         */
+        private const val DESKTOP_LOGIN_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+        /**
+         * Origin rule for the document-start injection: the script runs on every doubao.com
+         * page (the login round trip also bounces through `passport.doubao.com`, whose pages
+         * need the visibility override as much as the main origin does).
+         */
+        private const val DOCUMENT_START_ORIGIN_RULE = "https://*.doubao.com"
+
         /** HTTP status codes at or above this value turn the main frame into a load failure. */
         private const val HTTP_ERROR_MIN = 400
 
@@ -1178,6 +1447,12 @@ class LoginActivity : ComponentActivity() {
 
         /** Delay between page-finished and the blank-page probe. */
         private const val BLANK_CHECK_DELAY_MS = 4_000L
+
+        /**
+         * Delay between page-finished and the DOM login-button fallback probe (route 3,
+         * upstream macOS `checkLoginState` runs it 2 s after `didFinish` too).
+         */
+        private const val DOM_LOGIN_CHECK_DELAY_MS = 2_000L
 
         // Blank-probe verdicts shown by the diagnostics panel (see [diagBlankProbe]). The
         // distinction is the root-cause evidence: "no-callback" = the Chromium render process
@@ -1210,8 +1485,21 @@ class LoginActivity : ComponentActivity() {
          * able to render. Blank here means the WebView itself cannot render (layer switch or a
          * WebView update is needed); rendering fine means the blank login page is the page's own
          * doing. Never carries credentials - the probe only reads readyState and text length.
+         *
+         * v0.2.8: the self-test is demoted to diagnostics-only (see [onBlankPageDetected]) and
+         * disabled by default via [RENDER_SELF_TEST_ENABLED]; the probe never navigates the
+         * user's WebView unless the flag is switched on for a debugging session.
          */
         private const val RENDER_TEST_URL = "https://www.baidu.com"
+
+        /**
+         * v0.2.8 demotion switch for the two-stage render self-test: `false` keeps the machine
+         * (stages, verdicts, probe page) compiled and loggable for diagnosis, but the blank-page
+         * verdict goes straight to the plain LoadFailed screen and the probe never runs. The
+         * white screen the machine was built for turned out to be the Compose AndroidView
+         * factory bug, fixed by the FrameLayout wrapper.
+         */
+        private const val RENDER_SELF_TEST_ENABLED = false
 
         // Custom Tabs collection loop (see [startCustomTabsCollection]).
 
@@ -1323,6 +1611,7 @@ private enum class RenderTestStage {
 class LoginBridge(
     private val onDetected: () -> Unit,
     private val onExpired: () -> Unit,
+    private val onLoginState: (Boolean) -> Unit,
 ) {
 
     /**
@@ -1333,6 +1622,19 @@ class LoginBridge(
     @JavascriptInterface
     fun onLoginDetected() {
         onDetected.invoke()
+    }
+
+    /**
+     * Called by the document-start script once the intercepted `/alice/profile/self` response
+     * has been classified (upstream parity: macOS/Linux `inject-websocket.js`, Windows
+     * `login.rs`). Carries a bare boolean - no nickname, no cookie value ever crosses the
+     * bridge; the session material itself is read by the repository straight from the cookie
+     * jar and localStorage. Invoked on a WebView JavaBridge thread.
+     */
+    @Keep
+    @JavascriptInterface
+    fun onLoginState(loggedIn: Boolean) {
+        onLoginState.invoke(loggedIn)
     }
 
     /**
@@ -1389,6 +1691,115 @@ private const val LOGIN_POLL_JS = """
 private const val POLL_RESET_JS = "try { window.__murmurLoginPoll = false; } catch (e) { }"
 
 /**
+ * Document-start login detector, ported line-by-line from the upstream desktop clients'
+ * `inject-websocket.js` (macOS `doubao-murmur/Resources/`, Linux
+ * `linux/src/doubao_murmur/resources/`; Windows `login.rs` inlines the same logic):
+ *
+ * 1. Page Visibility override - verbatim upstream; keeps the page from throttling its JS
+ *    timers and session keep-alive requests while it is occluded.
+ * 2. `fetch` + `XMLHttpRequest` interception of `/alice/profile/self` - verbatim upstream;
+ *    the page's own profile call is classified into a signed-in / signed-out verdict.
+ *
+ * The only delta against the upstream source is the notification channel: the desktops post
+ * to `window.webkit.messageHandlers.asr_handler`, here the verdict crosses the existing
+ * [LoginBridge] (`window.MurmurBridge.onLoginState(bool)`) as a bare boolean (nickname
+ * dropped - the extractor never needed it). The script adds no network behaviour of its own;
+ * it only wraps calls the page makes anyway, and it is scoped to the doubao.com wildcard
+ * origin rule [LoginActivity.DOCUMENT_START_ORIGIN_RULE].
+ *
+ * Injected via `WebViewCompat.addDocumentStartJavaScript` (upstream parity: all three desktop
+ * clients run this at document start); on a provider without that feature it degrades to
+ * `onPageStarted` injection (see [LoginActivity.configureLoginWebView]).
+ */
+private const val DOCUMENT_START_LOGIN_JS = """
+(function() {
+    'use strict';
+
+    // --- Page Visibility API override (upstream inject-websocket.js, verbatim) ---
+    // Prevent the page from knowing it's hidden so that JS timers and
+    // session keep-alive requests continue running in the background.
+    Object.defineProperty(document, 'visibilityState', {
+        get: function() { return 'visible'; },
+        configurable: true
+    });
+    Object.defineProperty(document, 'hidden', {
+        get: function() { return false; },
+        configurable: true
+    });
+    // Suppress visibilitychange events so page logic never enters a "hidden" branch
+    document.addEventListener('visibilitychange', function(e) {
+        e.stopImmediatePropagation();
+    }, true);
+
+    // --- Fetch interception: detect profile API for login status ---
+    var OriginalFetch = window.fetch;
+    window.fetch = function() {
+        var url = arguments[0];
+        var urlStr = (typeof url === 'string') ? url : (url && url.url) || '';
+
+        var promise = OriginalFetch.apply(this, arguments);
+
+        if (urlStr.includes('/alice/profile/self')) {
+            promise.then(function(response) {
+                var cloned = response.clone();
+                cloned.json().then(function(data) {
+                    if (data && data.code === 0 && data.data && data.data.profile_brief) {
+                        notifyLoginState(true);
+                    } else {
+                        notifyLoginState(false);
+                    }
+                }).catch(function() {
+                    notifyLoginState(false);
+                });
+            }).catch(function() {
+                // Network error - can't determine login
+            });
+        }
+
+        return promise;
+    };
+
+    // --- XHR interception: fallback for profile API ---
+    var OriginalXHROpen = XMLHttpRequest.prototype.open;
+    var OriginalXHRSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        this.__doubaoMurmurUrl = url;
+        return OriginalXHROpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function() {
+        if (this.__doubaoMurmurUrl && this.__doubaoMurmurUrl.includes('/alice/profile/self')) {
+            this.addEventListener('load', function() {
+                try {
+                    var data = JSON.parse(this.responseText);
+                    if (data && data.code === 0 && data.data && data.data.profile_brief) {
+                        notifyLoginState(true);
+                    }
+                } catch(e) {}
+            });
+        }
+        return OriginalXHRSend.apply(this, arguments);
+    };
+
+    // Android notification channel: the desktop clients post to their native message
+    // handlers (window.webkit.messageHandlers.asr_handler), here the verdict crosses the
+    // existing JavascriptInterface bridge as a bare boolean.
+    function notifyLoginState(loggedIn) {
+        try {
+            if (window.MurmurBridge) { window.MurmurBridge.onLoginState(loggedIn); }
+        } catch (e) { }
+    }
+})();
+"""
+
+/**
+ * Route 3 DOM query (upstream `inject-dom.js` / `checkLoginState`): the "to login" button is
+ * the page's own signed-out marker. One-shot, reads a boolean only.
+ */
+private const val DOM_LOGIN_BUTTON_QUERY_JS =
+    "try { !!document.querySelector('button[data-testid=\"to_login_button\"]') } " +
+        "catch (e) { false }"
+
+/**
  * One-shot read of the login flag used by the page-finished gate in [LoginActivity]. Returns the
  * raw localStorage value (`"true"`, or JSON `null` when unset), so the Kotlin side can decide on
  * the exact string instead of trusting the page load itself.
@@ -1428,6 +1839,7 @@ private fun LoginScreen(
     diagBlankProbe: String,
     diagRenderTestVerdict: String,
     webViewProvider: () -> WebView?,
+    provideWebView: () -> WebView?,
     backLabel: String,
     titleLabel: String,
     retryLabel: String,
@@ -1439,8 +1851,6 @@ private fun LoginScreen(
     onRetry: () -> Unit,
     onOpenInBrowser: () -> Unit,
     onOpenSystemBrowser: () -> Unit,
-    onWebViewReady: (WebView) -> Unit,
-    onWebViewUnavailable: () -> Unit,
 ) {
     // The WebView background only shows before the page paints and after a load failure - the
     // page's own rendering is unaffected - but it must follow the theme, or a light-mode failure
@@ -1560,23 +1970,44 @@ private fun LoginScreen(
         // the epoch bumped, which recreates this node (and through it the WebView) from scratch.
         key(webViewEpoch) {
             AndroidView(
-                // The factory runs once; configuration and the initial loadUrl happen inside
-                // attachWebView. update{} must never call loadUrl or every recomposition reloads
-                // the page and throws away whatever the user typed.
+                // The factory never constructs the WebView itself: the instance is pre-created
+                // and fully configured by the activity (see [LoginActivity.ensureLoginWebView])
+                // and only wrapped here, matching the community workaround for the Compose
+                // AndroidView white-screen bug (SO #78482022, OnePlus KB2003 / Android 14
+                // verified on v0.2.7): a WebView returned straight from the factory never
+                // paints, while the same instance inside a plain FrameLayout renders fine -
+                // the same shape the IME's Compose+FrameLayout container already uses.
+                // update{} must never call loadUrl or every recomposition reloads the page and
+                // throws away whatever the user typed.
                 factory = { context ->
-                    try {
-                        WebView(context).also { view ->
-                            view.setBackgroundColor(webViewBackground)
-                            onWebViewReady(view)
+                    val loginWebView = provideWebView()
+                    if (loginWebView == null) {
+                        // No WebView provider: show the toolbar over a blank surface instead of
+                        // a white screen or a crash (provideWebView already posted the
+                        // WebViewUnavailable state).
+                        FrameLayout(context)
+                    } else {
+                        FrameLayout(context).apply {
+                            setBackgroundColor(webViewBackground)
+                            // Same themed background on the WebView itself: it only shows
+                            // before the page paints and after a load failure, but it must
+                            // follow the theme or a light-mode failure renders as an
+                            // unexplained black rectangle.
+                            loginWebView.setBackgroundColor(webViewBackground)
+                            addView(
+                                loginWebView,
+                                ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                ),
+                            )
                         }
-                    } catch (e: RuntimeException) {
-                        // No WebView provider: show the toolbar over a blank surface instead of a
-                        // white screen or a crash.
-                        onWebViewUnavailable()
-                        View(context)
                     }
                 },
-                update = { view -> (view as? WebView)?.setBackgroundColor(webViewBackground) },
+                update = { view ->
+                    view.setBackgroundColor(webViewBackground)
+                    (view as? ViewGroup)?.getChildAt(0)?.setBackgroundColor(webViewBackground)
+                },
                 modifier = Modifier.fillMaxSize(),
             )
         }

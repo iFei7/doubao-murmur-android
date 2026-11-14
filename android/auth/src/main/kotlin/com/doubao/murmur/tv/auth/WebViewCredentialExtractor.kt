@@ -45,14 +45,15 @@ import kotlin.coroutines.resume
  * that is in fact logged in.
  *
  * ## Success criterion
- * `deviceId` and `webId` non-empty **and** the cookie set contains a session cookie -
- * `sessionid`, `sid_tt` or `sessionid_ss` - with a non-empty value. The tea SDK cache
- * (`deviceId` / `webId`) and pre-login cookies such as `ttwid` exist as soon as the page loads,
- * so requiring *any* cookie would report success for a page the user has not logged in on yet.
- * Requiring the `sessionid` family specifically cannot be relaxed on ROM grounds either: those
- * cookies are httpOnly, and `CookieManager.getCookie(url)` returns httpOnly cookies too (unlike
- * `document.cookie`), so "cookie jar not synced yet" would equally hide `sessionid` - and a
- * device-id-only credential is rejected by the server anyway (`AsrFailure.LoginExpired`).
+ * `deviceId` and `webId` non-empty **and** the cookie set contains at least one of the upstream
+ * session-cookie names (see [SESSION_COOKIE_NAMES]: the `sessionid` family plus `uid_tt` and
+ * `passport_auth_status`, matching the upstream Windows client's `SESSION_COOKIE_HINTS`) with a
+ * non-empty value. The tea SDK cache (`deviceId` / `webId`) and pre-login cookies such as
+ * `ttwid` exist as soon as the page loads, so requiring *any* cookie would report success for a
+ * page the user has not logged in on yet. The session cookies are httpOnly, and
+ * `CookieManager.getCookie(url)` returns httpOnly cookies too (unlike `document.cookie`), so
+ * "cookie jar not synced yet" would equally hide them - and a device-id-only credential is
+ * rejected by the server anyway (`AsrFailure.LoginExpired`).
  */
 object WebViewCredentialExtractor {
 
@@ -67,9 +68,20 @@ object WebViewCredentialExtractor {
 
     /**
      * Cookie names that only exist once the user actually signed in. The login flow is judged on
-     * these; pre-login cookies (`ttwid` etc.) are not proof of a session.
+     * these; pre-login cookies (`ttwid` etc.) are not proof of a session. Any one hit is enough.
+     *
+     * Aligned with the upstream Windows client (`windows/src-tauri/src/login.rs`,
+     * `SESSION_COOKIE_HINTS`): `uid_tt` and `passport_auth_status` complete the set - some
+     * accounts land post-login URLs that carry those variants before the `sessionid` family
+     * appears in the jar, and the upstream desktop clients treat a single hit as login proof.
      */
-    internal val SESSION_COOKIE_NAMES: Set<String> = setOf("sessionid", "sid_tt", "sessionid_ss")
+    internal val SESSION_COOKIE_NAMES: Set<String> = setOf(
+        "sessionid",
+        "sessionid_ss",
+        "sid_tt",
+        "uid_tt",
+        "passport_auth_status",
+    )
 
     private val SCRIPT = """
         (function(){try{return JSON.stringify({

@@ -79,6 +79,23 @@ class WebViewCredentialExtractorTest {
     }
 
     @Test
+    fun `uid_tt counts as logged in`() {
+        // Upstream Windows SESSION_COOKIE_HINTS member; some post-login landings carry it
+        // before the sessionid family appears.
+        val jar = WebViewCredentialExtractor.parseCookies("ttwid=1xxx; uid_tt=upstream-variant")
+        assertTrue(WebViewCredentialExtractor.hasSessionCookie(jar))
+    }
+
+    @Test
+    fun `passport_auth_status counts as logged in`() {
+        // Upstream Windows SESSION_COOKIE_HINTS member.
+        val jar = WebViewCredentialExtractor.parseCookies(
+            "ttwid=1xxx; passport_auth_status=flag-value",
+        )
+        assertTrue(WebViewCredentialExtractor.hasSessionCookie(jar))
+    }
+
+    @Test
     fun `present but empty session cookie is not a session`() {
         // doubao.com clears the value during logout; a leftover empty entry must not pass.
         val jar = WebViewCredentialExtractor.parseCookies("sessionid=; ttwid=1xxx")
@@ -91,9 +108,15 @@ class WebViewCredentialExtractorTest {
     }
 
     @Test
-    fun `session cookie names cover the sessionid family`() {
+    fun `session cookie names match the upstream Windows hints`() {
         assertEquals(
-            setOf("sessionid", "sid_tt", "sessionid_ss"),
+            setOf(
+                "sessionid",
+                "sessionid_ss",
+                "sid_tt",
+                "uid_tt",
+                "passport_auth_status",
+            ),
             WebViewCredentialExtractor.SESSION_COOKIE_NAMES,
         )
     }
