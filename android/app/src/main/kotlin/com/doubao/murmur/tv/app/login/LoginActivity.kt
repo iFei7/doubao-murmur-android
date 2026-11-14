@@ -38,18 +38,23 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -62,6 +67,7 @@ import com.doubao.murmur.tv.auth.DoubaoLoginUrl
 import com.doubao.murmur.tv.auth.SessionRepository
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -147,6 +153,23 @@ class LoginActivity : ComponentActivity() {
      */
     private var softwareRendering = false
 
+    //region On-screen diagnostics panel (read-only evidence, see DiagnosticsPanel).
+    // Mutable Compose state so the panel recomposes as the counters move. Updated on the main
+    // thread only (WebView callbacks all arrive there). No cookie or credential values ever land
+    // here - the URL is stripped down to host+path by [sanitizeUrlForDiagnostics].
+    /** Times [WebViewClient.onPageFinished] fired - "page loaded but blank" evidence. */
+    private var diagPageFinishedCount by mutableIntStateOf(0)
+
+    /** Times [WebViewClient.onRenderProcessGone] fired - silent Chromium crash-loop evidence. */
+    private var diagRenderGoneCount by mutableIntStateOf(0)
+
+    /** Last page-finished URL, query/fragment stripped (may carry tokens) and truncated. */
+    private var diagLastFinishedUrl by mutableStateOf("")
+
+    /** Render self-test verdict, e.g. "baidu ok" / "sw blank"; [RENDER_TEST_NOT_RUN] upfront. */
+    private var diagRenderTestVerdict by mutableStateOf(RENDER_TEST_NOT_RUN)
+    //endregion
+
     /** Back handler that walks the WebView history; enabled/disabled by [updateBackState]. */
     private lateinit var backCallback: OnBackPressedCallback
 
@@ -168,6 +191,14 @@ class LoginActivity : ComponentActivity() {
                     phase = phase,
                     errorHint = errorHint,
                     webViewEpoch = webViewEpoch,
+                    diagFinishedCount = diagPageFinishedCount,
+                    diagRenderGoneCount = diagRenderGoneCount,
+                    diagLastUrl = diagLastFinishedUrl,
+                    diagRenderTestVerdict = diagRenderTestVerdict,
+                    // Reads the live field at each call, so the panel always sees the current
+                    // WebView (rebuilt instances included) without storing a view in Compose
+                    // state - writing state from the AndroidView factory can re-enter composition.
+                    webViewProvider = { webView },
                     backLabel = stringResource(R.string.action_back),
                     titleLabel = stringResource(R.string.login_title),
                     retryLabel = stringResource(R.string.login_action_retry),
@@ -289,6 +320,8 @@ class LoginActivity : ComponentActivity() {
                 override fun onPageFinished(view: WebView, url: String?) {
                     super.onPageFinished(view, url)
                     Log.i(TAG, "Page finished: $url")
+                    diagPageFinishedCount += 1
+                    diagLastFinishedUrl = sanitizeUrlForDiagnostics(url)
                     // The history shape changed; BACK may gain or lose its page-navigation role.
                     updateBackState()
                     // Start the localStorage poll on every navigation; the script is idempotent.
@@ -369,6 +402,7 @@ class LoginActivity : ComponentActivity() {
                     detail: RenderProcessGoneDetail,
                 ): Boolean {
                     Log.w(TAG, "WebView render process gone; rebuilding")
+                    diagRenderGoneCount += 1
                     // The framework requires the dead WebView to be torn down rather than used.
                     // A fresh one is created by bumping [webViewEpoch]: the AndroidView node is
                     // recreated, its factory runs attachWebView again, and the login URL is
@@ -569,6 +603,7 @@ class LoginActivity : ComponentActivity() {
             RenderTestStage.Baidu -> {
                 Log.w(TAG, "RENDER-TEST: baidu blank under hardware rendering; retrying with " +
                     "software rendering")
+                diagRenderTestVerdict = RENDER_TEST_BAIDU_BLANK
                 val view = webView
                 if (view == null) {
                     cancelRenderSelfTest()
@@ -583,6 +618,7 @@ class LoginActivity : ComponentActivity() {
             RenderTestStage.Software -> {
                 Log.w(TAG, "RENDER-TEST: baidu blank under software rendering too; WebView " +
                     "itself cannot render")
+                diagRenderTestVerdict = RENDER_TEST_SW_BLANK
                 renderTestStage = null
                 errorHint = getString(R.string.login_render_test_webview_broken)
                 phase = LoginPhase.LoadFailed
@@ -637,11 +673,13 @@ class LoginActivity : ComponentActivity() {
         when (stage) {
             RenderTestStage.Baidu -> {
                 Log.w(TAG, "RENDER-TEST: baidu ok; the Doubao page itself failed to render")
+                diagRenderTestVerdict = RENDER_TEST_BAIDU_OK
                 errorHint = getString(R.string.login_render_test_page_rejected)
                 phase = LoginPhase.LoadFailed
             }
             RenderTestStage.Software -> {
                 Log.w(TAG, "RENDER-TEST: hw blank -> sw ok; keeping the software layer")
+                diagRenderTestVerdict = RENDER_TEST_SW_OK
                 errorHint = getString(R.string.login_render_test_software_fix)
                 // Back to the normal waiting flow: the login page reloads under the software
                 // layer, the poller re-arms and the user signs in as usual.
@@ -759,6 +797,23 @@ class LoginActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Strips everything after the path from [url] for the on-screen panel: the login round trip
+     * carries tokens in the query (e.g. `from_login`, SSO parameters) that must never be shown
+     * on screen. Only `host + path` survives, truncated to fit the panel line.
+     */
+    private fun sanitizeUrlForDiagnostics(url: String?): String {
+        if (url.isNullOrBlank()) {
+            return ""
+        }
+        val clean = runCatching { Uri.parse(url) }.getOrNull()
+            ?.takeIf { !it.host.isNullOrBlank() }
+            ?.let { it.host + it.path }
+            // Parse failed / opaque URI: still drop the query rather than risk leaking tokens.
+            ?: url.substringBefore('?')
+        return clean.take(DIAG_URL_MAX_LENGTH)
+    }
+
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
         webView?.let { view ->
@@ -828,8 +883,20 @@ class LoginActivity : ComponentActivity() {
          */
         private const val MAX_BACK_HISTORY = 15
 
-        /**
-         * Intent for the login flow.
+        // On-screen diagnostics panel (see DiagnosticsPanel).
+
+        /** Self-test verdict before the self-test ever produced a result. */
+        private const val RENDER_TEST_NOT_RUN = "not run"
+
+        private const val RENDER_TEST_BAIDU_OK = "baidu ok"
+
+        private const val RENDER_TEST_SW_OK = "sw ok"
+
+        private const val RENDER_TEST_BAIDU_BLANK = "baidu blank"
+
+        private const val RENDER_TEST_SW_BLANK = "sw blank"
+
+        /** Intent for the login flow.
          *
          * `FLAG_ACTIVITY_NEW_TASK` only for non-activity callers (the IME fallback path); an
          * activity caller needs the result in its own task.
@@ -843,6 +910,18 @@ class LoginActivity : ComponentActivity() {
         }
     }
 }
+
+// On-screen diagnostics panel constants (see DiagnosticsPanel). File-level so both the activity
+// and the panel composable can read them.
+
+/** Panel URL line cap (host + path, query stripped). */
+private const val DIAG_URL_MAX_LENGTH = 60
+
+/** Panel UA line cap. */
+private const val DIAG_UA_MAX_LENGTH = 40
+
+/** How often the panel re-reads the WebView size/layer. */
+private const val DIAG_REFRESH_INTERVAL_MS = 500L
 
 /** What the hint bar is saying, and whether it offers a retry. */
 private enum class LoginPhase {
@@ -989,6 +1068,11 @@ private fun LoginScreen(
     phase: LoginPhase,
     errorHint: String,
     webViewEpoch: Int,
+    diagFinishedCount: Int,
+    diagRenderGoneCount: Int,
+    diagLastUrl: String,
+    diagRenderTestVerdict: String,
+    webViewProvider: () -> WebView?,
     backLabel: String,
     titleLabel: String,
     retryLabel: String,
@@ -1051,6 +1135,17 @@ private fun LoginScreen(
                 fontSize = 13.sp,
             )
         }
+        // On-screen diagnostics: the blank-screen evidence a bug-report screenshot needs. Read
+        // only - it never changes phase logic - and shown whenever the failure state is visible.
+        if (phase == LoginPhase.LoadFailed || errorHint.isNotBlank()) {
+            DiagnosticsPanel(
+                finishedCount = diagFinishedCount,
+                renderGoneCount = diagRenderGoneCount,
+                lastUrl = diagLastUrl,
+                renderTestVerdict = diagRenderTestVerdict,
+                webViewProvider = webViewProvider,
+            )
+        }
         // Escape hatch for the failure states: the credentials can only be collected inside this
         // WebView, so opening a browser does not substitute for the login - it is a diagnostic
         // affordance to check what the network makes of the same URL.
@@ -1097,6 +1192,94 @@ private fun LoginScreen(
                 modifier = Modifier.fillMaxSize(),
             )
         }
+    }
+}
+
+/**
+ * Compact, read-only evidence panel shown under the hint bar while the failure state is up.
+ *
+ * A user screenshot of this panel answers the two open blank-screen questions directly:
+ * - the WebView's actual measured size (0x0 would mean a collapsed layout) and its layer type;
+ * - whether pages ever finished loading and whether the Chromium render process has been dying
+ *   (`renderGone` counting a silent rebuild loop) plus the render self-test verdict.
+ *
+ * The size line refreshes every [DIAG_REFRESH_INTERVAL_MS] while the composable is
+ * alive: [webViewProvider] reads the activity's live field at each tick, so rebuilt WebViews
+ * (epoch bumps) and render-process-gone detachments are picked up without storing a view in
+ * Compose state. No cookie or credential value is ever displayed - see
+ * [LoginActivity.sanitizeUrlForDiagnostics].
+ */
+@Composable
+private fun DiagnosticsPanel(
+    finishedCount: Int,
+    renderGoneCount: Int,
+    lastUrl: String,
+    renderTestVerdict: String,
+    webViewProvider: () -> WebView?,
+) {
+    // Size/layer/UA are not Compose state upstream; poll them into local state on the UI thread.
+    var sizeLine by remember { mutableStateOf("WebView: not attached") }
+    var uaLine by remember { mutableStateOf("ua=-") }
+    // rememberUpdatedState keeps the loop reading the latest provider lambda; the loop itself
+    // lives until this panel leaves composition (failure state dismissed / activity finishing).
+    val provider by rememberUpdatedState(webViewProvider)
+    LaunchedEffect(Unit) {
+        while (true) {
+            val view = provider()
+            if (view == null) {
+                sizeLine = "WebView: not attached"
+                uaLine = "ua=-"
+            } else {
+                val layer = if (view.layerType == View.LAYER_TYPE_SOFTWARE) "SW" else "HW"
+                sizeLine = "WebView: ${view.width}x${view.height}px @ $layer layer"
+                uaLine = "ua=" + (view.settings.userAgentString ?: "")
+                    .take(DIAG_UA_MAX_LENGTH)
+            }
+            delay(DIAG_REFRESH_INTERVAL_MS)
+        }
+    }
+    Column(
+        modifier = Modifier
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .fillMaxWidth()
+            .background(
+                color = MurmurColors.SurfaceElevated,
+                shape = RoundedCornerShape(6.dp),
+            )
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = sizeLine,
+            color = MurmurColors.OnSurfaceMuted,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        Text(
+            text = "finished=$finishedCount renderGone=$renderGoneCount",
+            color = MurmurColors.OnSurfaceMuted,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        Text(
+            text = "last=$lastUrl",
+            color = MurmurColors.OnSurfaceMuted,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+        )
+        Text(
+            text = "render-test: $renderTestVerdict",
+            color = MurmurColors.OnSurfaceMuted,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        Text(
+            text = uaLine,
+            color = MurmurColors.OnSurfaceMuted,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+        )
     }
 }
 
