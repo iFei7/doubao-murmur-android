@@ -212,5 +212,14 @@ object WebViewCredentialExtractor {
     internal fun hasSessionCookie(cookies: Map<String, String>): Boolean =
         SESSION_COOKIE_NAMES.any { name -> !cookies[name].isNullOrEmpty() }
 
+    /**
+     * True when the raw cookie header - as returned by `CookieManager.getCookie(url)` - contains
+     * a session cookie. Same criterion as [hasSessionCookie], exposed for callers that only have
+     * the header (e.g. the Custom Tabs login route polling the global jar without a live page).
+     * Presence-only: callers must not log the header, only this boolean.
+     */
+    fun hasSessionCookieInHeader(header: String?): Boolean =
+        hasSessionCookie(parseCookies(header))
+
     private fun presence(value: String?): String = if (value == null) "missing" else "ok"
 }

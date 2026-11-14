@@ -2,6 +2,7 @@ package com.doubao.murmur.tv.app.login
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -29,6 +30,9 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.annotation.Keep
+import androidx.browser.customtabs.CustomTabsClient
+import androidx.browser.customtabs.CustomTabsIntent
+import androidx.browser.customtabs.CustomTabsServiceConnection
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -65,12 +69,17 @@ import com.doubao.murmur.tv.app.AppGraph
 import com.doubao.murmur.tv.app.R
 import com.doubao.murmur.tv.auth.DoubaoLoginUrl
 import com.doubao.murmur.tv.auth.SessionRepository
+import com.doubao.murmur.tv.auth.WebViewCredentialExtractor
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.json.JSONTokener
+import kotlin.coroutines.resume
 
 /**
  * WebView host that harvests the doubao.com session so the ASR socket can be authenticated.
@@ -118,6 +127,13 @@ class LoginActivity : ComponentActivity() {
     /** Set once [blankCheck] has fired for the current page; reset in onPageFinished. */
     private var blankCheckDone = false
 
+    /**
+     * Timeout for the blank-probe JS round trip: a `evaluateJavascript` callback that never runs
+     * is the *no-callback* verdict - the render process is not executing JS at all. Posted when
+     * the probe is sent, removed by its callback; re-armed per page in [onPageFinished].
+     */
+    private val blankProbeTimeout = Runnable { diagBlankProbe = BLANK_PROBE_NO_CALLBACK }
+
     /** Drives the hint bar: the retry affordance only exists once the poller gave up. */
     private var phase by mutableStateOf(LoginPhase.Waiting)
 
@@ -153,6 +169,45 @@ class LoginActivity : ComponentActivity() {
      */
     private var softwareRendering = false
 
+    //region Custom Tabs login route (see [openInCustomTabs]).
+    // The route runs fully in parallel with the in-app WebView flow above: its collection loop
+    // lives in its own coroutine, reads only the system-wide cookie jar and never touches the
+    // in-app poller / blank check / render self-test. Whichever route first sees a signed-in
+    // session calls [onSignedIn] (single completion, first-wins).
+
+    /** Browser-side client once the binding to the Custom Tabs provider is established. */
+    private var customTabsClient: CustomTabsClient? = null
+
+    /** True while the provider binding is alive (or still connecting); cleared on unbind. */
+    private var customTabsBound = false
+
+    /** Set when the entry button was pressed while the binding was still connecting. */
+    private var customTabLaunchPending = false
+
+    /** Collection loop polling the cookie jar while the user is inside the Custom Tab. */
+    private var customTabsCollectionJob: Job? = null
+
+    /**
+     * Offscreen 1x1 WebView that shares this app's data directory - and with it the session the
+     * Custom Tab wrote there. It exists only to load a doubao.com page whose JS writes the tea
+     * cache into localStorage so [SessionRepository.saveFromWebView] can read the ids back.
+     */
+    private var offscreenWebView: WebView? = null
+
+    private val customTabsConnection = object : CustomTabsServiceConnection() {
+        override fun onCustomTabsServiceConnected(name: ComponentName, client: CustomTabsClient) {
+            customTabsClient = client
+            runCatching { client.warmup(0L) }
+            // The button may have been pressed while the bind was still in flight.
+            launchPendingCustomTab()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName) {
+            customTabsClient = null
+        }
+    }
+    //endregion
+
     //region On-screen diagnostics panel (read-only evidence, see DiagnosticsPanel).
     // Mutable Compose state so the panel recomposes as the counters move. Updated on the main
     // thread only (WebView callbacks all arrive there). No cookie or credential values ever land
@@ -165,6 +220,15 @@ class LoginActivity : ComponentActivity() {
 
     /** Last page-finished URL, query/fragment stripped (may carry tokens) and truncated. */
     private var diagLastFinishedUrl by mutableStateOf("")
+
+    /**
+     * JS blank-probe verdict, e.g. "pending" / "returned(ready=complete,len=1234)" /
+     * "no-callback"; [BLANK_PROBE_NOT_RUN] upfront. The decisive blank-screen evidence: the
+     * probe is a plain `evaluateJavascript` round trip, so **no-callback** means the Chromium
+     * render process never executes JS (dead renderer), while **returned** means JS runs but
+     * the page still paints nothing (compositing / page-side failure).
+     */
+    private var diagBlankProbe by mutableStateOf(BLANK_PROBE_NOT_RUN)
 
     /** Render self-test verdict, e.g. "baidu ok" / "sw blank"; [RENDER_TEST_NOT_RUN] upfront. */
     private var diagRenderTestVerdict by mutableStateOf(RENDER_TEST_NOT_RUN)
@@ -194,6 +258,7 @@ class LoginActivity : ComponentActivity() {
                     diagFinishedCount = diagPageFinishedCount,
                     diagRenderGoneCount = diagRenderGoneCount,
                     diagLastUrl = diagLastFinishedUrl,
+                    diagBlankProbe = diagBlankProbe,
                     diagRenderTestVerdict = diagRenderTestVerdict,
                     // Reads the live field at each call, so the panel always sees the current
                     // WebView (rebuilt instances included) without storing a view in Compose
@@ -204,9 +269,12 @@ class LoginActivity : ComponentActivity() {
                     retryLabel = stringResource(R.string.login_action_retry),
                     openInBrowserLabel = stringResource(R.string.login_action_open_in_browser),
                     openInBrowserNote = stringResource(R.string.login_open_in_browser_note),
+                    systemBrowserLabel = stringResource(R.string.login_action_open_system_browser),
+                    systemBrowserNote = stringResource(R.string.login_customtabs_note),
                     onBack = { finish() },
                     onRetry = ::onRetryClicked,
                     onOpenInBrowser = ::openInBrowser,
+                    onOpenSystemBrowser = ::openInCustomTabs,
                     onWebViewReady = ::attachWebView,
                     onWebViewUnavailable = ::markWebViewUnavailable,
                 )
@@ -330,6 +398,8 @@ class LoginActivity : ComponentActivity() {
                     // Re-arm the blank-page watchdog (once per page; see [blankCheck]).
                     blankCheckDone = false
                     mainHandler.removeCallbacks(blankCheck)
+                    mainHandler.removeCallbacks(blankProbeTimeout)
+                    diagBlankProbe = BLANK_PROBE_NOT_RUN
                     if (!signedIn) {
                         mainHandler.postDelayed(blankCheck, BLANK_CHECK_DELAY_MS)
                     }
@@ -558,18 +628,34 @@ class LoginActivity : ComponentActivity() {
             return
         }
         blankCheckDone = true
+        // Record that the probe went out; if the callback below never runs (timeout), the panel
+        // ends up with "no-callback" - the renderer does not even execute JS.
+        diagBlankProbe = BLANK_PROBE_PENDING
+        mainHandler.removeCallbacks(blankProbeTimeout)
+        mainHandler.postDelayed(blankProbeTimeout, BLANK_PROBE_TIMEOUT_MS)
         view.evaluateJavascript(BLANK_CHECK_JS) { raw ->
-            val summary = runCatching {
-                (JSONTokener(raw ?: "null").nextValue() as? JSONObject)?.toString()
+            // The callback runs on the UI thread; removing the timeout here marks the probe as
+            // answered no matter how the payload decodes below.
+            mainHandler.removeCallbacks(blankProbeTimeout)
+            val obj = runCatching {
+                JSONTokener(raw ?: "null").nextValue() as? JSONObject
             }.getOrNull()
-            if (summary == null) {
+            // The callback running at all is itself the evidence: JS executed inside the
+            // renderer. Only the decode quality varies.
+            diagBlankProbe = if (obj == null) {
+                BLANK_PROBE_RETURNED_UNREADABLE
+            } else {
+                "$BLANK_PROBE_RETURNED_PREFIX(" +
+                    "ready=${obj.optString("ready")},len=${obj.optInt("len", -1)})"
+            }
+            if (obj == null) {
                 Log.w(TAG, "Blank check: no readable result (raw=${raw?.take(80)})")
                 return@evaluateJavascript
             }
+            val summary = obj.toString()
             Log.i(TAG, "Blank check: $summary")
-            val obj = runCatching { JSONObject(summary) }.getOrNull()
-            val ready = obj?.optString("ready").orEmpty()
-            val textLength = obj?.optInt("len", -1) ?: -1
+            val ready = obj.optString("ready")
+            val textLength = obj.optInt("len", -1)
             // No body text at all, or the document never finished - neither recovers on its own.
             if (textLength < BLANK_PAGE_TEXT_MIN_LENGTH || ready != "complete") {
                 onBlankPageDetected(summary)
@@ -729,6 +815,177 @@ class LoginActivity : ComponentActivity() {
         }
     }
 
+    //region Custom Tabs login route.
+
+    /**
+     * Opens the login page in a Custom Tab and starts the credential collection.
+     *
+     * The tab is launched with a session created through a binding to the system browser
+     * (`CustomTabsClient.bindCustomTabsService`). Because this app declares its own
+     * [LoginCustomTabsService], a supporting browser stores that tab's cookies and localStorage
+     * in a profile backed by this app's data directory - the exact data
+     * [SessionRepository.saveFromWebView] reads. The in-app WebView keeps running the normal
+     * flow meanwhile; whichever route first sees a signed-in session finishes the screen.
+     */
+    private fun openInCustomTabs() {
+        if (signedIn) {
+            return
+        }
+        val client = customTabsClient
+        if (client != null) {
+            launchCustomTab(client)
+            return
+        }
+        if (customTabsBound) {
+            // Bind still connecting; the launch happens in the connection callback.
+            customTabLaunchPending = true
+            return
+        }
+        val provider = runCatching { CustomTabsClient.getPackageName(this, null) }.getOrNull()
+        if (provider == null) {
+            Log.w(TAG, "No Custom Tabs provider available")
+            errorHint = getString(R.string.login_customtabs_open_failed)
+            return
+        }
+        customTabLaunchPending = true
+        customTabsBound = runCatching {
+            CustomTabsClient.bindCustomTabsService(this, provider, customTabsConnection)
+        }.getOrDefault(false)
+        if (!customTabsBound) {
+            customTabLaunchPending = false
+            Log.w(TAG, "Binding to the Custom Tabs provider failed")
+            errorHint = getString(R.string.login_customtabs_open_failed)
+        }
+    }
+
+    private fun launchPendingCustomTab() {
+        val client = customTabsClient ?: return
+        if (!customTabLaunchPending) {
+            return
+        }
+        customTabLaunchPending = false
+        launchCustomTab(client)
+    }
+
+    private fun launchCustomTab(client: CustomTabsClient) {
+        val session = runCatching { client.newSession(null) }.getOrNull()
+        val intent = CustomTabsIntent.Builder(session).build()
+        runCatching { intent.launchUrl(this, Uri.parse(DoubaoLoginUrl.LOGIN_URL)) }
+            .onSuccess {
+                // Visible feedback that the route is live; the collection loop takes over from
+                // here. Only claimed while the screen is still in a quiet wait, so a load-error
+                // hint or a render self-test wording is never overwritten.
+                if (!signedIn && phase == LoginPhase.Waiting && errorHint.isBlank()) {
+                    errorHint = getString(R.string.login_customtabs_opened)
+                }
+                startCustomTabsCollection()
+            }
+            .onFailure {
+                Log.w(TAG, "Custom Tab launch failed")
+                errorHint = getString(R.string.login_customtabs_open_failed)
+            }
+    }
+
+    /**
+     * Polls the system-wide cookie jar for the Doubao session cookies while the user is inside
+     * the Custom Tab. The jar is global and shared with the tab (see [LoginCustomTabsService]),
+     * so the `sessionid` family appears here as soon as the user signed in on the tab - no
+     * in-app page involvement needed.
+     *
+     * On a confirmed session the offscreen WebView takes over: it loads a doubao.com page so
+     * the tea SDK writes the device ids into localStorage, then the exact same extraction the
+     * in-app route uses produces the credentials. A missing tea cache (page JS not done yet) is
+     * retried on later ticks - the loop only stops on success or when its 10 min window ends.
+     *
+     * Cookie handling is presence-only: the header itself is parsed and dropped, no cookie
+     * value is ever logged or stored in state.
+     */
+    private fun startCustomTabsCollection() {
+        if (customTabsCollectionJob?.isActive == true || signedIn) {
+            return
+        }
+        customTabsCollectionJob = lifecycleScope.launch {
+            repeat(CUSTOMTABS_COLLECT_MAX_TICKS) {
+                delay(CUSTOMTABS_COLLECT_INTERVAL_MS)
+                if (signedIn) {
+                    return@launch
+                }
+                val header = runCatching {
+                    CookieManager.getInstance().getCookie(DoubaoLoginUrl.COOKIE_URL)
+                }.getOrNull()
+                val hasSession = header != null &&
+                    WebViewCredentialExtractor.hasSessionCookieInHeader(header)
+                if (!hasSession || saveInFlight) {
+                    return@repeat
+                }
+                Log.i(TAG, "Custom Tabs route: session cookies present, collecting credentials")
+                if (saveFromOffscreenWebView()) {
+                    return@launch
+                }
+            }
+            if (!signedIn) {
+                Log.w(TAG, "Custom Tabs collection window expired without a session")
+                if (phase == LoginPhase.Waiting && errorHint.isBlank()) {
+                    errorHint = getString(R.string.login_not_detected)
+                }
+            }
+        }
+    }
+
+    private fun obtainOffscreenWebView(): WebView? {
+        offscreenWebView?.let { return it }
+        return try {
+            WebView(this).apply {
+                settings.javaScriptEnabled = true
+                // The ids this route needs live in localStorage.
+                settings.domStorageEnabled = true
+                // Never attached to a window: the page has no visible surface, but the DOM,
+                // the JS and the localStorage it writes all work - that is all this route needs.
+            }.also { offscreenWebView = it }
+        } catch (e: RuntimeException) {
+            // No usable WebView provider on this ROM.
+            Log.w(TAG, "Offscreen WebView unavailable")
+            null
+        }
+    }
+
+    /**
+     * Loads the Doubao origin in the offscreen WebView so the page JS writes the tea cache
+     * (`__tea_cache_tokens_497858`), then runs the shared extraction. Returns true only when
+     * the credentials were persisted; a failed attempt keeps the collection loop alive.
+     */
+    private suspend fun saveFromOffscreenWebView(): Boolean {
+        val view = obtainOffscreenWebView() ?: return false
+        saveInFlight = true
+        try {
+            val loaded = awaitOffscreenPage(view, OFFSCREEN_PAGE_LOAD_TIMEOUT_MS)
+            if (!loaded) {
+                Log.w(TAG, "Offscreen page load timed out")
+                return false
+            }
+            return sessionRepository.saveFromWebView(view).isSuccess
+        } finally {
+            saveInFlight = false
+        }
+    }
+
+    /** Resolves once the offscreen page finished loading, or null after [timeoutMs]. */
+    private suspend fun awaitOffscreenPage(view: WebView, timeoutMs: Long): Boolean =
+        withTimeoutOrNull(timeoutMs) {
+            suspendCancellableCoroutine { continuation ->
+                view.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(v: WebView, url: String?) {
+                        if (continuation.isActive) {
+                            continuation.resume(Unit)
+                        }
+                    }
+                }
+                view.loadUrl(DoubaoLoginUrl.COOKIE_URL)
+            }
+        } != null
+
+    //endregion
+
     /**
      * Toolbar retry: a load failure reloads the page from scratch (there is nothing on it worth
      * keeping), while a poller expiry keeps the page - the user may have just signed in - and only
@@ -816,6 +1073,11 @@ class LoginActivity : ComponentActivity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
+        if (customTabsBound) {
+            runCatching { unbindService(customTabsConnection) }
+            customTabsBound = false
+        }
+        customTabsClient = null
         webView?.let { view ->
             (view.parent as? ViewGroup)?.removeView(view)
             view.stopLoading()
@@ -823,6 +1085,12 @@ class LoginActivity : ComponentActivity() {
             view.destroy()
         }
         webView = null
+        offscreenWebView?.let { view ->
+            view.stopLoading()
+            view.webViewClient = WebViewClient()
+            view.destroy()
+        }
+        offscreenWebView = null
         try {
             // Persist what the page just wrote; the ASR socket reads it back from the encrypted
             // store. Throws on a ROM whose WebView provider is missing.
@@ -866,6 +1134,29 @@ class LoginActivity : ComponentActivity() {
         /** Delay between page-finished and the blank-page probe. */
         private const val BLANK_CHECK_DELAY_MS = 4_000L
 
+        // Blank-probe verdicts shown by the diagnostics panel (see [diagBlankProbe]). The
+        // distinction is the root-cause evidence: "no-callback" = the Chromium render process
+        // never executes JS (dead renderer); "returned(...)" = JS runs but the page still paints
+        // nothing (compositing failure or page-side refusal).
+
+        /** Probe not sent for the current page yet. */
+        private const val BLANK_PROBE_NOT_RUN = "not-run"
+
+        /** Probe sent, callback not received yet. */
+        private const val BLANK_PROBE_PENDING = "pending"
+
+        /** Prefix for a probe whose callback ran; carries readyState and body-text length. */
+        private const val BLANK_PROBE_RETURNED_PREFIX = "returned"
+
+        /** Callback ran but the payload could not be decoded as a JSON object. */
+        private const val BLANK_PROBE_RETURNED_UNREADABLE = "returned(unreadable)"
+
+        /** Probe sent, but the JS callback never came back within [BLANK_PROBE_TIMEOUT_MS]. */
+        private const val BLANK_PROBE_NO_CALLBACK = "no-callback"
+
+        /** How long the probe may take to answer before being declared no-callback. */
+        private const val BLANK_PROBE_TIMEOUT_MS = 8_000L
+
         /**
          * Probe page for the render self-test: a plain, cache-friendly page the WebView must be
          * able to render. Blank here means the WebView itself cannot render (layer switch or a
@@ -873,6 +1164,17 @@ class LoginActivity : ComponentActivity() {
          * doing. Never carries credentials - the probe only reads readyState and text length.
          */
         private const val RENDER_TEST_URL = "https://www.baidu.com"
+
+        // Custom Tabs collection loop (see [startCustomTabsCollection]).
+
+        /** Poll interval for the system cookie jar while the user is inside the Custom Tab. */
+        private const val CUSTOMTABS_COLLECT_INTERVAL_MS = 2_000L
+
+        /** Ticks the collection loop may run: 300 x 2 s = a 10 minute window. */
+        private const val CUSTOMTABS_COLLECT_MAX_TICKS = 300
+
+        /** How long the offscreen WebView may take to load the Doubao origin before a retry. */
+        private const val OFFSCREEN_PAGE_LOAD_TIMEOUT_MS = 15_000L
 
         /** A page whose rendered body text is shorter than this counts as blank. */
         private const val BLANK_PAGE_TEXT_MIN_LENGTH = 10
@@ -1071,6 +1373,7 @@ private fun LoginScreen(
     diagFinishedCount: Int,
     diagRenderGoneCount: Int,
     diagLastUrl: String,
+    diagBlankProbe: String,
     diagRenderTestVerdict: String,
     webViewProvider: () -> WebView?,
     backLabel: String,
@@ -1078,9 +1381,12 @@ private fun LoginScreen(
     retryLabel: String,
     openInBrowserLabel: String,
     openInBrowserNote: String,
+    systemBrowserLabel: String,
+    systemBrowserNote: String,
     onBack: () -> Unit,
     onRetry: () -> Unit,
     onOpenInBrowser: () -> Unit,
+    onOpenSystemBrowser: () -> Unit,
     onWebViewReady: (WebView) -> Unit,
     onWebViewUnavailable: () -> Unit,
 ) {
@@ -1136,15 +1442,45 @@ private fun LoginScreen(
             )
         }
         // On-screen diagnostics: the blank-screen evidence a bug-report screenshot needs. Read
-        // only - it never changes phase logic - and shown whenever the failure state is visible.
-        if (phase == LoginPhase.LoadFailed || errorHint.isNotBlank()) {
+        // only - it never changes phase logic - and shown for every non-Waiting phase (Expired
+        // included) or whenever a hint is up; a plain quiet wait adds noise, not evidence.
+        if (phase != LoginPhase.Waiting || errorHint.isNotBlank()) {
             DiagnosticsPanel(
                 finishedCount = diagFinishedCount,
                 renderGoneCount = diagRenderGoneCount,
                 lastUrl = diagLastUrl,
+                blankProbe = diagBlankProbe,
                 renderTestVerdict = diagRenderTestVerdict,
                 webViewProvider = webViewProvider,
             )
+        }
+        // Custom Tabs route: opens the login page with the system-level WebView stack. The
+        // in-app WebView above keeps running the normal flow in parallel - the first route that
+        // sees a signed-in session collects the credentials and closes the screen (first-wins).
+        // Hidden only when there is no WebView provider at all, since the credential collection
+        // needs CookieManager either way.
+        if (phase != LoginPhase.WebViewUnavailable) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onOpenSystemBrowser) {
+                    Text(
+                        text = systemBrowserLabel,
+                        color = MurmurColors.Accent,
+                        fontSize = 14.sp,
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = systemBrowserNote,
+                    modifier = Modifier.weight(1f),
+                    color = MurmurColors.OnSurfaceMuted,
+                    fontSize = 12.sp,
+                )
+            }
         }
         // Escape hatch for the failure states: the credentials can only be collected inside this
         // WebView, so opening a browser does not substitute for the login - it is a diagnostic
@@ -1214,6 +1550,7 @@ private fun DiagnosticsPanel(
     finishedCount: Int,
     renderGoneCount: Int,
     lastUrl: String,
+    blankProbe: String,
     renderTestVerdict: String,
     webViewProvider: () -> WebView?,
 ) {
@@ -1259,6 +1596,13 @@ private fun DiagnosticsPanel(
             color = MurmurColors.OnSurfaceMuted,
             fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
+        )
+        Text(
+            text = "probe: $blankProbe",
+            color = MurmurColors.OnSurfaceMuted,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
         )
         Text(
             text = "last=$lastUrl",

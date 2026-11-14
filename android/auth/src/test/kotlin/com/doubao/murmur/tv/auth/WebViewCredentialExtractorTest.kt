@@ -99,4 +99,36 @@ class WebViewCredentialExtractorTest {
     }
 
     // endregion
+
+    // region hasSessionCookieInHeader - the raw-header convenience used by the Custom Tabs route
+
+    @Test
+    fun `raw header with a session cookie passes`() {
+        assertTrue(
+            WebViewCredentialExtractor.hasSessionCookieInHeader(
+                "ttwid=1xxx; sessionid=real-session; sid_guard=x",
+            ),
+        )
+    }
+
+    @Test
+    fun `raw header without a session cookie fails`() {
+        assertFalse(
+            WebViewCredentialExtractor.hasSessionCookieInHeader(
+                "ttwid=1xxx; _ga=GA1.1.2; msToken=abc",
+            ),
+        )
+    }
+
+    @Test
+    fun `empty session cookie in raw header fails`() {
+        assertFalse(WebViewCredentialExtractor.hasSessionCookieInHeader("sessionid=; ttwid=1xxx"))
+    }
+
+    @Test
+    fun `null raw header fails`() {
+        assertFalse(WebViewCredentialExtractor.hasSessionCookieInHeader(null))
+    }
+
+    // endregion
 }

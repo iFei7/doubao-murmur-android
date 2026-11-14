@@ -47,6 +47,10 @@
     <string name="login_render_test_webview_broken">The system WebView cannot render. Update Android System WebView (search it in the app store) and retry</string>
     <string name="login_action_open_in_browser">Open in browser</string>
     <string name="login_open_in_browser_note">Sign-in credentials are still collected on this page; the browser is only for checking the network</string>
+    <string name="login_action_open_system_browser">Sign in with the system browser</string>
+    <string name="login_customtabs_note">Opens the login page with the system WebView. Finish signing in there, then return to this app - it closes automatically</string>
+    <string name="login_customtabs_opened">Login page opened in the system browser. Finish signing in there, then return to this app</string>
+    <string name="login_customtabs_open_failed">Could not open the system browser</string>
     <string name="login_hint_scan">Scan the code with your phone or type your account. This screen closes once you are signed in.</string>
 
     <!-- IME keyboard (owned by :ime, mirrored here so the app module keeps the single source of
