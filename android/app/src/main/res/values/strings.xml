@@ -38,6 +38,8 @@
     <string name="login_not_detected">Sign-in was not detected. Finish signing in on the page, then retry</string>
     <string name="login_action_retry">I have signed in, retry</string>
     <string name="login_webview_unavailable">This device has no system WebView, so signing in is not possible</string>
+    <string name="login_error_load_failed">Page failed to load. Check your network and retry</string>
+    <string name="login_error_ssl">Certificate error, the page could not be loaded</string>
     <string name="login_hint_scan">Scan the code with your phone or type your account. This screen closes once you are signed in.</string>
 
     <!-- IME keyboard (owned by :ime, mirrored here so the app module keeps the single source of

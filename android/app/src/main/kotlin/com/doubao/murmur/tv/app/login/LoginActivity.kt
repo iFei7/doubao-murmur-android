@@ -4,18 +4,25 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color as AndroidColor
+import android.net.http.SslError
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.SslErrorHandler
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.annotation.Keep
 import androidx.compose.foundation.background
@@ -31,10 +38,13 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -89,11 +99,28 @@ class LoginActivity : ComponentActivity() {
     /** Drives the hint bar: the retry affordance only exists once the poller gave up. */
     private var phase by mutableStateOf(LoginPhase.Waiting)
 
+    /**
+     * One-line failure description for [LoginPhase.LoadFailed]: a generic "page failed to load"
+     * plus the cause, or the dedicated certificate-error text. Always set before the phase flips,
+     * so the hint bar never shows a stale line.
+     */
+    private var errorHint by mutableStateOf("")
+
+    /**
+     * Bumped when the current WebView died (render process gone): the AndroidView node is keyed
+     * on this, so a bump tears down the dead instance and recreates the WebView from scratch
+     * (factory -> attachWebView -> loadUrl) through recomposition.
+     */
+    private var webViewEpoch by mutableIntStateOf(0)
+
     /** Back handler that walks the WebView history; enabled/disabled by [updateBackState]. */
     private lateinit var backCallback: OnBackPressedCallback
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Draw behind the system bars; LoginScreen adds `safeDrawingPadding` so the toolbar stays
+        // clear of the status bar (same behaviour as MainActivity).
+        enableEdgeToEdge()
         sessionRepository = AppGraph.sessionRepository(this)
 
         // Default outcome. Every way out of this screen except a successful extraction - BACK (once
@@ -105,11 +132,13 @@ class LoginActivity : ComponentActivity() {
             MurmurTvTheme {
                 LoginScreen(
                     phase = phase,
+                    errorHint = errorHint,
+                    webViewEpoch = webViewEpoch,
                     backLabel = stringResource(R.string.action_back),
                     titleLabel = stringResource(R.string.login_title),
                     retryLabel = stringResource(R.string.login_action_retry),
                     onBack = { finish() },
-                    onRetry = ::retrySave,
+                    onRetry = ::onRetryClicked,
                     onWebViewReady = ::attachWebView,
                     onWebViewUnavailable = ::markWebViewUnavailable,
                 )
@@ -150,7 +179,6 @@ class LoginActivity : ComponentActivity() {
     private fun attachWebView(view: WebView) {
         try {
             webView = view
-            view.setBackgroundColor(WEBVIEW_BACKGROUND)
 
             view.settings.apply {
                 // Without JS the Doubao login page does not render at all.
@@ -193,6 +221,76 @@ class LoginActivity : ComponentActivity() {
                     mainHandler.removeCallbacks(saveCheck)
                     val delay = if (url.contains(FROM_LOGIN_MARKER)) 0L else PAGE_SETTLE_DELAY_MS
                     mainHandler.postDelayed(saveCheck, delay)
+                }
+
+                override fun onReceivedError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    error: WebResourceError,
+                ) {
+                    super.onReceivedError(view, request, error)
+                    if (!request.isForMainFrame) {
+                        // A broken script, image or XHR must not block the login flow.
+                        Log.w(TAG, "Subresource error: ${error.description}")
+                        return
+                    }
+                    Log.w(TAG, "Main frame error: ${error.description}")
+                    showLoadError(error.description?.toString())
+                }
+
+                override fun onReceivedHttpError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    errorResponse: WebResourceResponse,
+                ) {
+                    super.onReceivedHttpError(view, request, errorResponse)
+                    if (!request.isForMainFrame) {
+                        return
+                    }
+                    val code = errorResponse.statusCode
+                    if (code < HTTP_ERROR_MIN) {
+                        // Redirects (3xx) are followed transparently by the WebView.
+                        return
+                    }
+                    Log.w(TAG, "Main frame HTTP error $code")
+                    showLoadError("HTTP $code")
+                }
+
+                override fun onReceivedSslError(
+                    view: WebView,
+                    handler: SslErrorHandler,
+                    error: SslError,
+                ) {
+                    // Never proceed past an invalid certificate: this flow harvests the session
+                    // cookies, so a MITM must not be waved through. The callback carries no
+                    // request info, so whether the failing resource is the main frame or a
+                    // subresource cannot be told here - treat it as a page failure either way.
+                    Log.w(TAG, "SSL error: ${error.primaryError}")
+                    runCatching { handler.cancel() }
+                    if (!signedIn) {
+                        errorHint = getString(R.string.login_error_ssl)
+                        phase = LoginPhase.LoadFailed
+                    }
+                }
+
+                override fun onRenderProcessGone(
+                    view: WebView,
+                    detail: RenderProcessGoneDetail,
+                ): Boolean {
+                    Log.w(TAG, "WebView render process gone; rebuilding")
+                    // The framework requires the dead WebView to be torn down rather than used.
+                    // A fresh one is created by bumping [webViewEpoch]: the AndroidView node is
+                    // recreated, its factory runs attachWebView again, and the login URL is
+                    // loaded from scratch. Returning true tells the system the app handled it.
+                    runCatching {
+                        view.stopLoading()
+                        (view.parent as? ViewGroup)?.removeView(view)
+                        view.webViewClient = WebViewClient()
+                        view.destroy()
+                    }
+                    webView = null
+                    webViewEpoch += 1
+                    return true
                 }
             }
 
@@ -293,10 +391,57 @@ class LoginActivity : ComponentActivity() {
      * worse than no button at all on a 3 m screen.
      */
     private fun onLoginPollExpired() {
-        if (signedIn) {
+        // Only a quiet wait may flip to "expired": a load-failure state must not be overwritten by
+        // a poller that is still running against a page that never loaded in the first place.
+        if (signedIn || phase != LoginPhase.Waiting) {
             return
         }
         phase = LoginPhase.Expired
+    }
+
+    /**
+     * Flips the screen into the explicit load-failure state instead of leaving the user staring at
+     * a blank (theme-dark) WebView: no network, DNS failure, HTTP >= 400 on the main frame... all
+     * used to be silent until the poller expired 48 s later. The hint bar names the cause and the
+     * toolbar offers a retry that reloads the page (see [retryLoad]).
+     */
+    private fun showLoadError(detail: String?) {
+        if (signedIn) {
+            return
+        }
+        val base = getString(R.string.login_error_load_failed)
+        val detailText = detail?.trim()?.take(ERROR_DETAIL_MAX_LENGTH)
+        errorHint = if (detailText.isNullOrBlank()) base else "$base ($detailText)"
+        phase = LoginPhase.LoadFailed
+    }
+
+    /**
+     * Toolbar retry: a load failure reloads the page from scratch (there is nothing on it worth
+     * keeping), while a poller expiry keeps the page - the user may have just signed in - and only
+     * re-runs the detection window.
+     */
+    private fun onRetryClicked() {
+        if (phase == LoginPhase.LoadFailed) {
+            retryLoad()
+        } else {
+            retrySave()
+        }
+    }
+
+    /** Reloads the login page after a main-frame load failure; the poller re-arms itself in
+     * [onPageFinished] once the fresh page settles. */
+    private fun retryLoad() {
+        val view = webView ?: return
+        if (signedIn) {
+            return
+        }
+        phase = LoginPhase.Waiting
+        errorHint = ""
+        mainHandler.removeCallbacks(saveCheck)
+        // The poller guards itself with a window flag; clear it so the fresh page can arm again.
+        view.evaluateJavascript(POLL_RESET_JS, null)
+        view.loadUrl(DoubaoLoginUrl.LOGIN_URL)
+        updateBackState()
     }
 
     /**
@@ -363,17 +508,20 @@ class LoginActivity : ComponentActivity() {
         /** Doubao appends this marker when the login round-trip comes back. */
         private const val FROM_LOGIN_MARKER = "from_login=1"
 
+        /** Log tag for the WebView error paths. Only error codes and descriptions are logged. */
+        private const val TAG = "LoginActivity"
+
+        /** HTTP status codes at or above this value turn the main frame into a load failure. */
+        private const val HTTP_ERROR_MIN = 400
+
+        /** Cap on the raw error description appended to the load-failure hint. */
+        private const val ERROR_DETAIL_MAX_LENGTH = 40
+
         /**
          * Beyond this many WebView history entries BACK stops stepping back and closes the screen
          * instead, so a cyclic redirect chain can never trap the user.
          */
         private const val MAX_BACK_HISTORY = 15
-
-        /**
-         * Matches [MurmurColors.Background] so the WebView does not flash white before the page
-         * paints. `WebView.setBackgroundColor` takes a packed ARGB int, not a Compose colour.
-         */
-        private val WEBVIEW_BACKGROUND: Int = AndroidColor.rgb(0x0B, 0x0B, 0x0F)
 
         /**
          * Intent for the login flow.
@@ -399,6 +547,12 @@ private enum class LoginPhase {
 
     /** The poller gave up; the viewer gets an explicit retry. */
     Expired,
+
+    /**
+     * The main frame failed to load (network, DNS, HTTP >= 400, bad certificate). The hint bar
+     * names the cause and the toolbar offers a retry that reloads the page.
+     */
+    LoadFailed,
 
     /** No WebView provider on this device; nothing can be done inside the app. */
     WebViewUnavailable,
@@ -493,11 +647,13 @@ private const val LOGIN_FLAG_QUERY_JS =
  *
  * The toolbar keeps the affordances a web page cannot provide: an explicit back button, a visible
  * "still working" progress bar while the poller is waiting, and a retry button once the poller
- * gave up.
+ * gave up or the page failed to load.
  */
 @Composable
 private fun LoginScreen(
     phase: LoginPhase,
+    errorHint: String,
+    webViewEpoch: Int,
     backLabel: String,
     titleLabel: String,
     retryLabel: String,
@@ -506,6 +662,10 @@ private fun LoginScreen(
     onWebViewReady: (WebView) -> Unit,
     onWebViewUnavailable: () -> Unit,
 ) {
+    // The WebView background only shows before the page paints and after a load failure - the
+    // page's own rendering is unaffected - but it must follow the theme, or a light-mode failure
+    // renders as an unexplained black rectangle under a white toolbar.
+    val webViewBackground = MurmurColors.Background.toArgb()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -537,42 +697,51 @@ private fun LoginScreen(
                     color = MurmurColors.Accent,
                     trackColor = MurmurColors.Outline,
                 )
-                LoginPhase.Expired -> TextButton(onClick = onRetry) {
+                LoginPhase.Expired, LoginPhase.LoadFailed -> TextButton(onClick = onRetry) {
                     Text(text = retryLabel, color = MurmurColors.Accent, fontSize = 14.sp)
                 }
                 LoginPhase.WebViewUnavailable -> Spacer(modifier = Modifier.width(48.dp))
             }
         }
-        if (phase == LoginPhase.Expired || phase == LoginPhase.WebViewUnavailable) {
+        if (phase != LoginPhase.Waiting) {
             Text(
-                text = phaseHint(phase),
+                text = phaseHint(phase, errorHint),
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 color = MurmurColors.OnSurfaceMuted,
                 fontSize = 13.sp,
             )
         }
-        AndroidView(
-            // The factory runs once; configuration and the initial loadUrl happen inside
-            // attachWebView. update{} must never call loadUrl or every recomposition reloads the
-            // page and throws away whatever the user typed.
-            factory = { context ->
-                try {
-                    WebView(context).also(onWebViewReady)
-                } catch (e: RuntimeException) {
-                    // No WebView provider: show the toolbar over a blank surface instead of a
-                    // white screen or a crash.
-                    onWebViewUnavailable()
-                    View(context)
-                }
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
+        // Keyed on webViewEpoch: when the render process dies the dead WebView is destroyed and
+        // the epoch bumped, which recreates this node (and through it the WebView) from scratch.
+        key(webViewEpoch) {
+            AndroidView(
+                // The factory runs once; configuration and the initial loadUrl happen inside
+                // attachWebView. update{} must never call loadUrl or every recomposition reloads
+                // the page and throws away whatever the user typed.
+                factory = { context ->
+                    try {
+                        WebView(context).also { view ->
+                            view.setBackgroundColor(webViewBackground)
+                            onWebViewReady(view)
+                        }
+                    } catch (e: RuntimeException) {
+                        // No WebView provider: show the toolbar over a blank surface instead of a
+                        // white screen or a crash.
+                        onWebViewUnavailable()
+                        View(context)
+                    }
+                },
+                update = { view -> (view as? WebView)?.setBackgroundColor(webViewBackground) },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
     }
 }
 
 @Composable
-private fun phaseHint(phase: LoginPhase): String = when (phase) {
+private fun phaseHint(phase: LoginPhase, errorHint: String): String = when (phase) {
     LoginPhase.Waiting -> stringResource(R.string.login_hint_scan)
     LoginPhase.Expired -> stringResource(R.string.login_not_detected)
+    LoginPhase.LoadFailed -> errorHint
     LoginPhase.WebViewUnavailable -> stringResource(R.string.login_webview_unavailable)
 }
