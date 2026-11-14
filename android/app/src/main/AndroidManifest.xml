@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/apk/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -13,16 +12,6 @@
     -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-
-    <!--
-      Android 11+ package visibility: the login screen's Custom Tabs route has to discover the
-      browser that implements the Custom Tabs protocol before it can bind to it.
-    -->
-    <queries>
-        <intent>
-            <action android:name="android.support.customtabs.action.CustomTabsService" />
-        </intent>
-    </queries>
 
     <uses-feature
         android:name="android.hardware.touchscreen"
@@ -61,23 +50,6 @@
         <activity
             android:name="com.doubao.murmur.tv.app.login.LoginActivity"
             android:exported="false" />
-
-        <!--
-          Declaring our own CustomTabsService is the documented prerequisite for the Custom Tab
-          session-data sharing: a tab launched with a session bound through this app stores its
-          cookies/localStorage in a profile backed by this app's data directory, so the login
-          screen can collect the credentials (see LoginActivity / LoginCustomTabsService).
-          The service itself is empty. exported=true is required - the browser binds to this
-          service to validate the association - and the browser is the only legitimate caller.
-        -->
-        <service
-            android:name="com.doubao.murmur.tv.app.login.LoginCustomTabsService"
-            android:exported="true"
-            tools:ignore="ExportedService">
-            <intent-filter>
-                <action android:name="android.support.customtabs.action.CustomTabsService" />
-            </intent-filter>
-        </service>
 
         <activity
             android:name="com.doubao.murmur.tv.app.permission.MicPermissionActivity"

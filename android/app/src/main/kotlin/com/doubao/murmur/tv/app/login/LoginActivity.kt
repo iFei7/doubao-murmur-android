@@ -2,7 +2,6 @@ package com.doubao.murmur.tv.app.login
 
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -24,6 +23,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
@@ -32,9 +32,6 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.annotation.Keep
-import androidx.browser.customtabs.CustomTabsClient
-import androidx.browser.customtabs.CustomTabsIntent
-import androidx.browser.customtabs.CustomTabsServiceConnection
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -73,17 +70,12 @@ import com.doubao.murmur.tv.app.AppGraph
 import com.doubao.murmur.tv.app.R
 import com.doubao.murmur.tv.auth.DoubaoLoginUrl
 import com.doubao.murmur.tv.auth.SessionRepository
-import com.doubao.murmur.tv.auth.WebViewCredentialExtractor
 import com.doubao.murmur.tv.auth.parseBlankProbePayload
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONTokener
-import kotlin.coroutines.resume
 
 /**
  * WebView host that harvests the doubao.com session so the ASR socket can be authenticated.
@@ -136,7 +128,7 @@ class LoginActivity : ComponentActivity() {
      * workaround for the Compose `AndroidView` white-screen bug (SO #78482022), the same shape
      * the IME's Compose+FrameLayout container already uses.
      *
-     * The instance is fully prepared before it is ever attached: settings, desktop UA, clients,
+     * The instance is fully prepared before it is ever attached: settings, mobile UA, clients,
      * the document-start injected login detector and the initial `loadUrl` all happen in
      * [configureLoginWebView]; the factory only adds the finished view to a `FrameLayout`.
      */
@@ -210,51 +202,6 @@ class LoginActivity : ComponentActivity() {
      */
     private var softwareRendering = false
 
-    //region Custom Tabs login route (see [openInCustomTabs]).
-    // The route runs fully in parallel with the in-app WebView flow above: its collection loop
-    // lives in its own coroutine, reads only the system-wide cookie jar and never touches the
-    // in-app poller / blank check / render self-test. Whichever route first sees a signed-in
-    // session calls [onSignedIn] (single completion, first-wins).
-
-    /** Browser-side client once the binding to the Custom Tabs provider is established. */
-    private var customTabsClient: CustomTabsClient? = null
-
-    /** True while the provider binding is alive (or still connecting); cleared on unbind. */
-    private var customTabsBound = false
-
-    /** Set when the entry button was pressed while the binding was still connecting. */
-    private var customTabLaunchPending = false
-
-    /**
-     * Set once a Custom Tab actually launched; consumed by [onResume] to reload the in-app login
-     * page once the user comes back (see there), then reset so a resume never reloads twice.
-     */
-    private var customTabLaunched = false
-
-    /** Collection loop polling the cookie jar while the user is inside the Custom Tab. */
-    private var customTabsCollectionJob: Job? = null
-
-    /**
-     * Offscreen 1x1 WebView that shares this app's data directory - and with it the session the
-     * Custom Tab wrote there. It exists only to load a doubao.com page whose JS writes the tea
-     * cache into localStorage so [SessionRepository.saveFromWebView] can read the ids back.
-     */
-    private var offscreenWebView: WebView? = null
-
-    private val customTabsConnection = object : CustomTabsServiceConnection() {
-        override fun onCustomTabsServiceConnected(name: ComponentName, client: CustomTabsClient) {
-            customTabsClient = client
-            runCatching { client.warmup(0L) }
-            // The button may have been pressed while the bind was still in flight.
-            launchPendingCustomTab()
-        }
-
-        override fun onServiceDisconnected(name: ComponentName) {
-            customTabsClient = null
-        }
-    }
-    //endregion
-
     //region On-screen diagnostics panel (read-only evidence, see DiagnosticsPanel).
     // Mutable Compose state so the panel recomposes as the counters move. Updated on the main
     // thread only (WebView callbacks all arrive there). No cookie or credential values ever land
@@ -320,12 +267,9 @@ class LoginActivity : ComponentActivity() {
                     retryLabel = stringResource(R.string.login_action_retry),
                     openInBrowserLabel = stringResource(R.string.login_action_open_in_browser),
                     openInBrowserNote = stringResource(R.string.login_open_in_browser_note),
-                    systemBrowserLabel = stringResource(R.string.login_action_open_system_browser),
-                    systemBrowserNote = stringResource(R.string.login_customtabs_note),
                     onBack = { finish() },
                     onRetry = ::onRetryClicked,
                     onOpenInBrowser = ::openInBrowser,
-                    onOpenSystemBrowser = ::openInCustomTabs,
                 )
             }
         }
@@ -408,6 +352,21 @@ class LoginActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * The UA the login WebView sends: the device's own WebView UA, i.e. the mobile Chrome-on-
+     * Android form the system browser uses. Preferred over a hard-coded string so the login page
+     * is served the mobile variant the browser gets on *this* device (Doubao branches on the UA:
+     * mobile UA -> mobile OAuth login page, desktop UA -> PC layout).
+     *
+     * [MOBILE_LOGIN_UA] is only a fallback for a ROM whose WebView refuses to report a UA; it is
+     * the mobile shape verified against the Doubao mobile OAuth login page.
+     */
+    private fun resolveLoginUserAgent(view: WebView): String {
+        val deviceUa = runCatching { WebSettings.getDefaultUserAgent(this) }.getOrNull()
+            ?: runCatching { view.settings.userAgentString }.getOrNull()
+        return deviceUa?.takeIf { it.isNotBlank() } ?: MOBILE_LOGIN_UA
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private fun configureLoginWebView(view: WebView) {
         // Document-start injection (upstream parity: all three desktop clients inject their
@@ -446,12 +405,12 @@ class LoginActivity : ComponentActivity() {
             javaScriptCanOpenWindowsAutomatically = true
             setSupportMultipleWindows(true)
             setGeolocationEnabled(false)
-            // Desktop UA, upstream-verified: all three desktop clients load doubao.com/chat
-            // with a desktop Chrome UA (macOS Chrome/146, Windows Chrome/126) and the page
-            // renders and signs in - see DESKTOP_LOGIN_UA. The v0.2.6 revert comment (mobile
-            // UA on purpose) is superseded: the v0.2.7 blank screen was the AndroidView
-            // factory bug above, not a UA problem.
-            userAgentString = DESKTOP_LOGIN_UA
+            // Mobile UA, deliberately: under a mobile UA Doubao serves its mobile OAuth login
+            // page (what a phone browser shows), under a desktop UA it serves the PC layout.
+            // v0.2.8 shipped the desktop UA and real-device testing showed the PC-style page;
+            // the v0.2.7 white screen was the AndroidView factory bug above, not the UA.
+            // See [resolveLoginUserAgent].
+            userAgentString = resolveLoginUserAgent(view)
         }
 
         // If the render self-test proved hardware compositing broken on this ROM (GPU
@@ -1064,206 +1023,6 @@ class LoginActivity : ComponentActivity() {
         }
     }
 
-    //region Custom Tabs login route.
-
-    /**
-     * Opens the login page in a Custom Tab and starts the credential collection.
-     *
-     * The tab is launched with a session created through a binding to the system browser
-     * (`CustomTabsClient.bindCustomTabsService`). Because this app declares its own
-     * [LoginCustomTabsService], a supporting browser stores that tab's cookies and localStorage
-     * in a profile backed by this app's data directory - the exact data
-     * [SessionRepository.saveFromWebView] reads. The in-app WebView keeps running the normal
-     * flow meanwhile; whichever route first sees a signed-in session finishes the screen.
-     */
-    private fun openInCustomTabs() {
-        if (signedIn) {
-            return
-        }
-        val client = customTabsClient
-        if (client != null) {
-            launchCustomTab(client)
-            return
-        }
-        if (customTabsBound) {
-            // Bind still connecting; the launch happens in the connection callback.
-            customTabLaunchPending = true
-            return
-        }
-        val provider = runCatching { CustomTabsClient.getPackageName(this, null) }.getOrNull()
-        if (provider == null) {
-            Log.w(TAG, "No Custom Tabs provider available")
-            errorHint = getString(R.string.login_customtabs_open_failed)
-            return
-        }
-        customTabLaunchPending = true
-        customTabsBound = runCatching {
-            CustomTabsClient.bindCustomTabsService(this, provider, customTabsConnection)
-        }.getOrDefault(false)
-        if (!customTabsBound) {
-            customTabLaunchPending = false
-            Log.w(TAG, "Binding to the Custom Tabs provider failed")
-            errorHint = getString(R.string.login_customtabs_open_failed)
-        }
-    }
-
-    private fun launchPendingCustomTab() {
-        val client = customTabsClient ?: return
-        if (!customTabLaunchPending) {
-            return
-        }
-        customTabLaunchPending = false
-        launchCustomTab(client)
-    }
-
-    private fun launchCustomTab(client: CustomTabsClient) {
-        val session = runCatching { client.newSession(null) }.getOrNull()
-        val intent = CustomTabsIntent.Builder(session).build()
-        runCatching { intent.launchUrl(this, Uri.parse(DoubaoLoginUrl.LOGIN_URL)) }
-            .onSuccess {
-                customTabLaunched = true
-                // Visible feedback that the route is live; the collection loop takes over from
-                // here. Only claimed while the screen is still in a quiet wait, so a load-error
-                // hint or a render self-test wording is never overwritten.
-                if (!signedIn && phase == LoginPhase.Waiting && errorHint.isBlank()) {
-                    errorHint = getString(R.string.login_customtabs_opened)
-                }
-                startCustomTabsCollection()
-            }
-            .onFailure {
-                Log.w(TAG, "Custom Tab launch failed")
-                errorHint = getString(R.string.login_customtabs_open_failed)
-            }
-    }
-
-    /**
-     * Polls the system-wide cookie jar for the Doubao session cookies while the user is inside
-     * the Custom Tab. The jar is global and shared with the tab (see [LoginCustomTabsService]),
-     * so the `sessionid` family appears here as soon as the user signed in on the tab - no
-     * in-app page involvement needed.
-     *
-     * On a confirmed session the offscreen WebView takes over: it loads a doubao.com page so
-     * the tea SDK writes the device ids into localStorage, then the exact same extraction the
-     * in-app route uses produces the credentials. A missing tea cache (page JS not done yet) is
-     * retried on later ticks - the loop only stops on success or when its 10 min window ends.
-     *
-     * Two diagnostics wrap the wait. Every tick logs the cookie *names* in the jar (values are
-     * dropped, presence-only) so a bug report shows whether the tab writes into this app's
-     * profile at all. And when not a single doubao cookie has appeared after
-     * [CUSTOMTABS_NO_COOKIE_TICKS], the browser clearly ignored the CustomTabsService-backed
-     * profile and kept the session in its own data directory - polling further cannot succeed,
-     * so the loop stops early with a hint instead of burning the full 10 min window.
-     *
-     * Cookie handling is presence-only: the header itself is parsed and dropped, no cookie
-     * value is ever logged or stored in state.
-     */
-    private fun startCustomTabsCollection() {
-        if (customTabsCollectionJob?.isActive == true || signedIn) {
-            return
-        }
-        customTabsCollectionJob = lifecycleScope.launch {
-            var anyCookieSeen = false
-            repeat(CUSTOMTABS_COLLECT_MAX_TICKS) { tick ->
-                delay(CUSTOMTABS_COLLECT_INTERVAL_MS)
-                if (signedIn) {
-                    return@launch
-                }
-                val header = runCatching {
-                    CookieManager.getInstance().getCookie(DoubaoLoginUrl.COOKIE_URL)
-                }.getOrNull()
-                // Presence-only: split the header into names, values are dropped.
-                val names = header
-                    ?.split(';')
-                    ?.map { it.trim().substringBefore('=') }
-                    ?.filter { it.isNotEmpty() }
-                    .orEmpty()
-                Log.i(TAG, "Custom Tabs route tick $tick: cookies=[${names.joinToString(", ")}]")
-                if (names.isNotEmpty()) {
-                    anyCookieSeen = true
-                } else if (tick + 1 >= CUSTOMTABS_NO_COOKIE_TICKS) {
-                    Log.w(
-                        TAG,
-                        "Custom Tabs route: no doubao cookie after 30 s; the browser did not " +
-                            "share the session",
-                    )
-                    if (phase == LoginPhase.Waiting && renderTestStage == null) {
-                        errorHint = getString(R.string.login_customtabs_no_session)
-                    }
-                    return@launch
-                }
-                val hasSession = header != null &&
-                    WebViewCredentialExtractor.hasSessionCookieInHeader(header)
-                if (!hasSession || saveInFlight) {
-                    return@repeat
-                }
-                Log.i(TAG, "Custom Tabs route: session cookies present, collecting credentials")
-                if (saveFromOffscreenWebView()) {
-                    return@launch
-                }
-            }
-            if (!signedIn) {
-                Log.w(TAG, "Custom Tabs collection window expired without a session")
-                if (phase == LoginPhase.Waiting && errorHint.isBlank()) {
-                    errorHint = getString(R.string.login_not_detected)
-                }
-            }
-        }
-    }
-
-    private fun obtainOffscreenWebView(): WebView? {
-        offscreenWebView?.let { return it }
-        return try {
-            WebView(this).apply {
-                settings.javaScriptEnabled = true
-                // The ids this route needs live in localStorage.
-                settings.domStorageEnabled = true
-                // Never attached to a window: the page has no visible surface, but the DOM,
-                // the JS and the localStorage it writes all work - that is all this route needs.
-            }.also { offscreenWebView = it }
-        } catch (e: RuntimeException) {
-            // No usable WebView provider on this ROM.
-            Log.w(TAG, "Offscreen WebView unavailable")
-            null
-        }
-    }
-
-    /**
-     * Loads the Doubao origin in the offscreen WebView so the page JS writes the tea cache
-     * (`__tea_cache_tokens_497858`), then runs the shared extraction. Returns true only when
-     * the credentials were persisted; a failed attempt keeps the collection loop alive.
-     */
-    private suspend fun saveFromOffscreenWebView(): Boolean {
-        val view = obtainOffscreenWebView() ?: return false
-        saveInFlight = true
-        try {
-            val loaded = awaitOffscreenPage(view, OFFSCREEN_PAGE_LOAD_TIMEOUT_MS)
-            if (!loaded) {
-                Log.w(TAG, "Offscreen page load timed out")
-                return false
-            }
-            return sessionRepository.saveFromWebView(view).isSuccess
-        } finally {
-            saveInFlight = false
-        }
-    }
-
-    /** Resolves once the offscreen page finished loading, or null after [timeoutMs]. */
-    private suspend fun awaitOffscreenPage(view: WebView, timeoutMs: Long): Boolean =
-        withTimeoutOrNull(timeoutMs) {
-            suspendCancellableCoroutine { continuation ->
-                view.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(v: WebView, url: String?) {
-                        if (continuation.isActive) {
-                            continuation.resume(Unit)
-                        }
-                    }
-                }
-                view.loadUrl(DoubaoLoginUrl.COOKIE_URL)
-            }
-        } != null
-
-    //endregion
-
     /**
      * Toolbar retry: a load failure reloads the page from scratch (there is nothing on it worth
      * keeping), while a poller expiry keeps the page - the user may have just signed in - and only
@@ -1349,32 +1108,8 @@ class LoginActivity : ComponentActivity() {
         return clean.take(DIAG_URL_MAX_LENGTH)
     }
 
-    /**
-     * Coming back from a Custom Tab: if the browser honoured the CustomTabsService-backed
-     * profile, the login session now sits in this app's cookie jar and the in-app login page -
-     * once reloaded - sees it and flips to signed-in on its own (the page-finished gate and the
-     * JS poller then trigger the save). If the browser kept the session in its own data
-     * directory, the page simply reloads signed-out and the probe/panel report it as before.
-     *
-     * Fires once per Custom Tab visit ([customTabLaunched] is consumed here, so an immediate
-     * second resume - e.g. a permission prompt - never reloads the page twice).
-     */
-    override fun onResume() {
-        super.onResume()
-        if (customTabLaunched && !signedIn) {
-            customTabLaunched = false
-            Log.i(TAG, "Returned from Custom Tab; reloading the in-app login page")
-            retryLoad()
-        }
-    }
-
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
-        if (customTabsBound) {
-            runCatching { unbindService(customTabsConnection) }
-            customTabsBound = false
-        }
-        customTabsClient = null
         popupWebViews.forEach { popup ->
             runCatching {
                 popup.stopLoading()
@@ -1390,12 +1125,6 @@ class LoginActivity : ComponentActivity() {
             view.destroy()
         }
         webView = null
-        offscreenWebView?.let { view ->
-            view.stopLoading()
-            view.webViewClient = WebViewClient()
-            view.destroy()
-        }
-        offscreenWebView = null
         try {
             // Persist what the page just wrote; the ASR socket reads it back from the encrypted
             // store. Throws on a ROM whose WebView provider is missing.
@@ -1419,15 +1148,15 @@ class LoginActivity : ComponentActivity() {
         private const val TAG = "LoginActivity"
 
         /**
-         * Desktop Chrome UA, the combination verified by the upstream desktop clients:
-         * macOS ships Chrome/146, Windows Chrome/126, Linux the same shape - all three load
-         * `doubao.com/chat` with a desktop UA and the page renders and signs in (see the
-         * upstream audit). The WebView keeps this UA for the whole login round trip so the
-         * page stays on the same layout the upstream detection scripts were written against.
+         * Fallback mobile UA, used only when [resolveLoginUserAgent] cannot read the device's
+         * own WebView UA. Mobile Chrome-on-Android shape, verified on the OnePlus KB2003 /
+         * Android 14 (the same form the device browser sends): under a mobile UA Doubao serves
+         * the mobile OAuth login page, under a desktop UA the PC layout.
          */
-        private const val DESKTOP_LOGIN_UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        private const val MOBILE_LOGIN_UA =
+            "Mozilla/5.0 (Linux; Android 14; KB2003 Build/UKQ1.230924.001) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.8103.38 Mobile " +
+                "Safari/537.36"
 
         /**
          * Origin rule for the document-start injection: the script runs on every doubao.com
@@ -1500,21 +1229,6 @@ class LoginActivity : ComponentActivity() {
          * factory bug, fixed by the FrameLayout wrapper.
          */
         private const val RENDER_SELF_TEST_ENABLED = false
-
-        // Custom Tabs collection loop (see [startCustomTabsCollection]).
-
-        /** Poll interval for the system cookie jar while the user is inside the Custom Tab. */
-        private const val CUSTOMTABS_COLLECT_INTERVAL_MS = 2_000L
-
-        /** Ticks the collection loop may run: 300 x 2 s = a 10 minute window. */
-        private const val CUSTOMTABS_COLLECT_MAX_TICKS = 300
-
-        /** Ticks with zero doubao cookies before the browser is declared not to share the
-         * session: 15 x 2 s = 30 s. */
-        private const val CUSTOMTABS_NO_COOKIE_TICKS = 15
-
-        /** How long the offscreen WebView may take to load the Doubao origin before a retry. */
-        private const val OFFSCREEN_PAGE_LOAD_TIMEOUT_MS = 15_000L
 
         /** A page whose rendered body text is shorter than this counts as blank. */
         private const val BLANK_PAGE_TEXT_MIN_LENGTH = 10
@@ -1845,12 +1559,9 @@ private fun LoginScreen(
     retryLabel: String,
     openInBrowserLabel: String,
     openInBrowserNote: String,
-    systemBrowserLabel: String,
-    systemBrowserNote: String,
     onBack: () -> Unit,
     onRetry: () -> Unit,
     onOpenInBrowser: () -> Unit,
-    onOpenSystemBrowser: () -> Unit,
 ) {
     // The WebView background only shows before the page paints and after a load failure - the
     // page's own rendering is unaffected - but it must follow the theme, or a light-mode failure
@@ -1915,34 +1626,6 @@ private fun LoginScreen(
                 renderTestVerdict = diagRenderTestVerdict,
                 webViewProvider = webViewProvider,
             )
-        }
-        // Custom Tabs route: opens the login page with the system-level WebView stack. The
-        // in-app WebView above keeps running the normal flow in parallel - the first route that
-        // sees a signed-in session collects the credentials and closes the screen (first-wins).
-        // Hidden only when there is no WebView provider at all, since the credential collection
-        // needs CookieManager either way.
-        if (phase != LoginPhase.WebViewUnavailable) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = onOpenSystemBrowser) {
-                    Text(
-                        text = systemBrowserLabel,
-                        color = MurmurColors.Accent,
-                        fontSize = 14.sp,
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = systemBrowserNote,
-                    modifier = Modifier.weight(1f),
-                    color = MurmurColors.OnSurfaceMuted,
-                    fontSize = 12.sp,
-                )
-            }
         }
         // Escape hatch for the failure states: the credentials can only be collected inside this
         // WebView, so opening a browser does not substitute for the login - it is a diagnostic
