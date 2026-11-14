@@ -25,6 +25,7 @@
         android:required="false" />
 
     <application
+        android:name="com.doubao.murmur.tv.app.MurmurApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true"
@@ -57,6 +58,21 @@
             android:exported="false"
             android:noHistory="true"
             android:theme="@style/Theme.MurmurTv.Translucent" />
+
+        <!--
+          Recognition bridge for the patched Gboard (com.google.android.inputmethod.latin).
+          Exported because it is bound from another app; the caller is authenticated by package
+          name in every transaction (see DoubaoAsrBridgeService), not by android:permission: a
+          signature-level permission cannot work because Gboard is re-signed with another key.
+          No dedicated process: the service reuses the app's cached SessionRepository.
+        -->
+        <service
+            android:name="com.doubao.murmur.tv.bridge.DoubaoAsrBridgeService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.doubao.murmur.tv.bridge.ASR" />
+            </intent-filter>
+        </service>
 
     </application>
 

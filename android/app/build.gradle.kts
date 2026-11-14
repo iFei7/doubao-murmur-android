@@ -100,6 +100,8 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        // The exported recognition bridge (com.doubao.murmur.tv.bridge) is AIDL-defined.
+        aidl = true
     }
 
     // TV channels sideload the APK/AAB directly, so the split APK must keep every language
@@ -164,6 +166,9 @@ dependencies {
     debugImplementation(libs.compose.ui.tooling)
 
     testImplementation(libs.junit4)
+    // Virtual-time coverage for AsrSessionManager's state machine (timeout guard, cancel during
+    // finish) without sleeping in the test.
+    testImplementation(libs.kotlinx.coroutines.test)
 
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
