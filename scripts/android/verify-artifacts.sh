@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# verify-artifacts.sh — 发布前产物自检（签名 / 版本号 / TV 声明）
+# verify-artifacts.sh — 发布前产物自检（签名 / 版本号 / IME 声明）
 #
 # 用法：
 #   bash scripts/android/verify-artifacts.sh
@@ -10,7 +10,7 @@
 #   1. release APK 能通过 apksigner verify（签名完整、v1/v2/v3 至少一种）
 #   2. 打印签名证书 SHA-256 指纹（写入 step summary，便于比对是否用了错误的 key）
 #   3. AAB 内 package / versionCode / versionName 与 $VERSION_CODE / $VERSION_NAME 一致
-#   4. APK 声明了 android.software.leanback（Android TV 必备）
+#   4. IME service 声明校验（leanback 不再要求，仅做检测提示）
 #   5. APK 内含输入法 Service 声明（DoubaoVoiceInputMethodService）
 #   6. minSdk / targetSdk 打印；若设置了 MIN_SDK_EXPECTED / TARGET_SDK_EXPECTED 则做等值校验
 #
@@ -150,10 +150,9 @@ badging="$(mktemp)"
 "${AAPT2}" dump badging "${APK_PATH}" > "${badging}" 2>/dev/null \
   || { rm -f "${badging}"; fail "aapt2 dump badging 失败，APK 结构异常"; }
 
-if ! grep -qi 'leanback' "${badging}"; then
-  rm -f "${badging}"
-  fail "APK 未声明 android.software.leanback —— TV 应用必须在 manifest 里声明该 uses-feature"
-fi
+grep -qi 'leanback' "${badging}" \
+  && log "leanback 已声明" \
+  || log "leanback 未声明（纯手机版，符合预期）"
 
 tree="$(mktemp)"
 "${AAPT2}" dump xmltree --file AndroidManifest.xml "${APK_PATH}" > "${tree}" 2>/dev/null \
@@ -170,15 +169,21 @@ if ! grep -q 'android.inputmethodservice.InputMethodService\|android.permission.
 fi
 
 ime_services="$(grep -c 'BIND_INPUT_METHOD' "${tree}" || true)"
+
+if grep -qi 'leanback' "${badging}"; then
+  leanback_status="leanback 已声明"
+else
+  leanback_status="leanback 未声明（纯手机版）"
+fi
 rm -f "${tree}" "${badging}"
 
-log "manifest 校验通过：leanback 已声明，IME service 已声明（BIND_INPUT_METHOD 出现 ${ime_services} 次）"
+log "manifest 校验通过：${leanback_status}，IME service 已声明（BIND_INPUT_METHOD 出现 ${ime_services} 次）"
 
 {
   echo ""
   echo "### Manifest 校验"
   echo ""
-  echo "- android.software.leanback：已声明"
+  echo "- android.software.leanback：${leanback_status#leanback }"
   echo "- DoubaoVoiceInputMethodService：已声明"
 } >> "${summary_file}"
 
