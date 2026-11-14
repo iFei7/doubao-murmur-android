@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
 import android.net.http.SslError
 import android.os.Bundle
 import android.os.Handler
@@ -12,12 +14,15 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -59,6 +64,7 @@ import com.doubao.murmur.tv.auth.SessionRepository
 import com.doubao.murmur.tv.ui.theme.MurmurColors
 import com.doubao.murmur.tv.ui.theme.MurmurTvTheme
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import org.json.JSONTokener
 
 /**
@@ -95,6 +101,17 @@ class LoginActivity : ComponentActivity() {
     private var webView: WebView? = null
     private var saveInFlight = false
     private var signedIn = false
+
+    /**
+     * Blank-page watchdog, armed on every [WebViewClient.onPageFinished] (flag reset there, so it
+     * runs once per page). The WebView error callbacks only fire on transport failures; a page
+     * that arrives with HTTP 200 but renders nothing (SPA scripts dying, a UA-based landing
+     * page) would otherwise sit as a white rectangle for the whole poller window.
+     */
+    private val blankCheck = Runnable { runBlankPageCheck() }
+
+    /** Set once [blankCheck] has fired for the current page; reset in onPageFinished. */
+    private var blankCheckDone = false
 
     /** Drives the hint bar: the retry affordance only exists once the poller gave up. */
     private var phase by mutableStateOf(LoginPhase.Waiting)
@@ -137,8 +154,11 @@ class LoginActivity : ComponentActivity() {
                     backLabel = stringResource(R.string.action_back),
                     titleLabel = stringResource(R.string.login_title),
                     retryLabel = stringResource(R.string.login_action_retry),
+                    openInBrowserLabel = stringResource(R.string.login_action_open_in_browser),
+                    openInBrowserNote = stringResource(R.string.login_open_in_browser_note),
                     onBack = { finish() },
                     onRetry = ::onRetryClicked,
+                    onOpenInBrowser = ::openInBrowser,
                     onWebViewReady = ::attachWebView,
                     onWebViewUnavailable = ::markWebViewUnavailable,
                 )
@@ -180,6 +200,18 @@ class LoginActivity : ComponentActivity() {
         try {
             webView = view
 
+            // Diagnostics: the provider build and the actual UA the WebView will send. The UA is
+            // deliberately the default one (see the settings block below); logging it makes the
+            // UA-based page-serving differences visible in a bug report.
+            runCatching {
+                val provider = packageManager.getPackageInfo(WEBVIEW_PROVIDER_PACKAGE, 0)
+                Log.i(
+                    TAG,
+                    "WebView provider: $WEBVIEW_PROVIDER_PACKAGE ${provider.versionName}; " +
+                        "UA=${WebSettings.getDefaultUserAgent(this)}",
+                )
+            }
+
             view.settings.apply {
                 // Without JS the Doubao login page does not render at all.
                 javaScriptEnabled = true
@@ -202,13 +234,41 @@ class LoginActivity : ComponentActivity() {
                 setAcceptThirdPartyCookies(view, true)
             }
 
+            view.webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                    // A blank page is usually a JS failure that never reaches any error callback;
+                    // the console is the only window into it.
+                    val line = "${consoleMessage.message()} " +
+                        "(${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})"
+                    when (consoleMessage.messageLevel()) {
+                        ConsoleMessage.MessageLevel.ERROR -> Log.w(TAG, "JS console error: $line")
+                        ConsoleMessage.MessageLevel.WARNING -> Log.w(TAG, "JS console warn: $line")
+                        else -> Log.d(TAG, "JS console: $line")
+                    }
+                    return false
+                }
+            }
+
             view.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    Log.i(TAG, "Page started: $url")
+                }
+
                 override fun onPageFinished(view: WebView, url: String?) {
                     super.onPageFinished(view, url)
+                    Log.i(TAG, "Page finished: $url")
                     // The history shape changed; BACK may gain or lose its page-navigation role.
                     updateBackState()
                     // Start the localStorage poll on every navigation; the script is idempotent.
                     view.evaluateJavascript(LOGIN_POLL_JS, null)
+
+                    // Re-arm the blank-page watchdog (once per page; see [blankCheck]).
+                    blankCheckDone = false
+                    mainHandler.removeCallbacks(blankCheck)
+                    if (!signedIn) {
+                        mainHandler.postDelayed(blankCheck, BLANK_CHECK_DELAY_MS)
+                    }
 
                     // passport.doubao.com and the SSO hops still carry pre-login cookies, so
                     // reading the jar there would store a dead session. Only Doubao pages that are
@@ -416,6 +476,68 @@ class LoginActivity : ComponentActivity() {
     }
 
     /**
+     * Delayed blank-page probe: [BLANK_CHECK_DELAY_MS] after page-finished, ask the DOM what it
+     * actually rendered. Pages the transport callbacks consider healthy (HTTP 200, no error) can
+     * still be empty - a SPA whose bootstrap script died renders nothing at all - and this is the
+     * safety net that turns that white rectangle into the normal retry screen. The injected
+     * summary travels through the same evaluateJavascript channel as the login flag; it contains
+     * no credentials, only readyState, a text length and the URL.
+     */
+    private fun runBlankPageCheck() {
+        val view = webView ?: return
+        if (signedIn || blankCheckDone) {
+            return
+        }
+        blankCheckDone = true
+        view.evaluateJavascript(BLANK_CHECK_JS) { raw ->
+            val summary = runCatching {
+                (JSONTokener(raw ?: "null").nextValue() as? JSONObject)?.toString()
+            }.getOrNull()
+            if (summary == null) {
+                Log.w(TAG, "Blank check: no readable result (raw=${raw?.take(80)})")
+                return@evaluateJavascript
+            }
+            Log.i(TAG, "Blank check: $summary")
+            val obj = runCatching { JSONObject(summary) }.getOrNull()
+            val ready = obj?.optString("ready").orEmpty()
+            val textLength = obj?.optInt("len", -1) ?: -1
+            // No body text at all, or the document never finished - neither recovers on its own.
+            if (textLength < BLANK_PAGE_TEXT_MIN_LENGTH || ready != "complete") {
+                onBlankPageDetected(summary)
+            }
+        }
+    }
+
+    /**
+     * Blank-page verdict: reuse the v0.2.1 LoadFailed screen (progress bar -> retry button) with
+     * a dedicated hint naming the empty-content cause plus the probe summary, so a bug report
+     * carries the readyState/length/url evidence inline.
+     */
+    private fun onBlankPageDetected(summary: String) {
+        if (signedIn || phase != LoginPhase.Waiting) {
+            return
+        }
+        Log.w(TAG, "Blank page detected: $summary")
+        val base = getString(R.string.login_error_blank_page)
+        val detail = summary.take(ERROR_DETAIL_MAX_LENGTH)
+        errorHint = if (detail.isBlank()) base else "$base ($detail)"
+        phase = LoginPhase.LoadFailed
+    }
+
+    /**
+     * Escape hatch: hand the login URL to a real browser. The session still has to be collected
+     * inside this WebView (the cookies never leave it), so this only helps diagnose what the
+     * network / a full browser makes of the same URL.
+     */
+    private fun openInBrowser() {
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(DoubaoLoginUrl.LOGIN_URL)))
+        }.onFailure {
+            Log.w(TAG, "No browser available for the login URL")
+        }
+    }
+
+    /**
      * Toolbar retry: a load failure reloads the page from scratch (there is nothing on it worth
      * keeping), while a poller expiry keeps the page - the user may have just signed in - and only
      * re-runs the detection window.
@@ -516,6 +638,15 @@ class LoginActivity : ComponentActivity() {
 
         /** Cap on the raw error description appended to the load-failure hint. */
         private const val ERROR_DETAIL_MAX_LENGTH = 40
+
+        /** Provider package whose version is logged for WebView diagnostics. */
+        private const val WEBVIEW_PROVIDER_PACKAGE = "com.google.android.webview"
+
+        /** Delay between page-finished and the blank-page probe. */
+        private const val BLANK_CHECK_DELAY_MS = 4_000L
+
+        /** A page whose rendered body text is shorter than this counts as blank. */
+        private const val BLANK_PAGE_TEXT_MIN_LENGTH = 10
 
         /**
          * Beyond this many WebView history entries BACK stops stepping back and closes the screen
@@ -643,6 +774,20 @@ private const val LOGIN_FLAG_QUERY_JS =
     "try { localStorage.getItem('flow_web_has_login') } catch (e) { null }"
 
 /**
+ * One-shot blank-page probe injected [LoginActivity.BLANK_CHECK_DELAY_MS] after page-finished.
+ * Reports what the DOM actually contains so the Kotlin side can tell a healthy page from a white
+ * rectangle: readyState, visible text length and the final URL (redirect target included).
+ */
+private const val BLANK_CHECK_JS =
+    """try {
+  JSON.stringify({
+    ready: document.readyState,
+    len: (document.body && document.body.innerText || '').length,
+    url: location.href
+  })
+} catch (e) { null }"""
+
+/**
  * Full screen WebView plus a slim toolbar.
  *
  * The toolbar keeps the affordances a web page cannot provide: an explicit back button, a visible
@@ -657,8 +802,11 @@ private fun LoginScreen(
     backLabel: String,
     titleLabel: String,
     retryLabel: String,
+    openInBrowserLabel: String,
+    openInBrowserNote: String,
     onBack: () -> Unit,
     onRetry: () -> Unit,
+    onOpenInBrowser: () -> Unit,
     onWebViewReady: (WebView) -> Unit,
     onWebViewUnavailable: () -> Unit,
 ) {
@@ -710,6 +858,28 @@ private fun LoginScreen(
                 color = MurmurColors.OnSurfaceMuted,
                 fontSize = 13.sp,
             )
+        }
+        // Escape hatch for the failure states: the credentials can only be collected inside this
+        // WebView, so opening a browser does not substitute for the login - it is a diagnostic
+        // affordance to check what the network makes of the same URL.
+        if (phase == LoginPhase.LoadFailed) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onOpenInBrowser) {
+                    Text(text = openInBrowserLabel, color = MurmurColors.Accent, fontSize = 14.sp)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = openInBrowserNote,
+                    modifier = Modifier.weight(1f),
+                    color = MurmurColors.OnSurfaceMuted,
+                    fontSize = 12.sp,
+                )
+            }
         }
         // Keyed on webViewEpoch: when the render process dies the dead WebView is destroyed and
         // the epoch bumped, which recreates this node (and through it the WebView) from scratch.

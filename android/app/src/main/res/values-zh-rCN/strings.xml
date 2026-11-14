@@ -39,6 +39,9 @@
     <string name="login_webview_unavailable">本机缺少系统 WebView 组件，无法登录</string>
     <string name="login_error_load_failed">页面加载失败，请检查网络后重试</string>
     <string name="login_error_ssl">证书异常，页面加载失败</string>
+    <string name="login_error_blank_page">页面内容为空，可能渲染失败。请重试，或用浏览器检查网络</string>
+    <string name="login_action_open_in_browser">在浏览器中打开</string>
+    <string name="login_open_in_browser_note">登录凭证仍需在本页完成采集，浏览器打开仅用于检查网络</string>
     <string name="login_hint_scan">用手机扫码或输入账号完成登录，登录后本页自动关闭</string>
 
     <!-- 输入法键盘（归 :ime 所有，此处镜像一份，保持应用模块是文案的唯一来源；
