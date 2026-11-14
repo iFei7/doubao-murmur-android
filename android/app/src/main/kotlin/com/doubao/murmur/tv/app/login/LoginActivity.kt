@@ -129,6 +129,24 @@ class LoginActivity : ComponentActivity() {
      */
     private var webViewEpoch by mutableIntStateOf(0)
 
+    /**
+     * Render self-test stage, or `null` when no self-test is running.
+     *
+     * After the blank-page watchdog finds the login page empty, the screen no longer gives up
+     * straight away: it probes [RENDER_TEST_URL] to find out *why* the page is blank. The stage
+     * routes the probe results through the branches described in [onBlankPageDetected] and
+     * [onRenderTestPageOk]. It is cancelled by any main-frame transport error ([showLoadError])
+     * and by the manual retry ([retryLoad]).
+     */
+    private var renderTestStage: RenderTestStage? = null
+
+    /**
+     * True once the self-test proved that hardware rendering is broken on this ROM and switched
+     * the WebView to [View.LAYER_TYPE_SOFTWARE]. Applied to every WebView (re)built by
+     * [attachWebView], so the fix survives a render-process rebuild for the whole session.
+     */
+    private var softwareRendering = false
+
     /** Back handler that walks the WebView history; enabled/disabled by [updateBackState]. */
     private lateinit var backCallback: OnBackPressedCallback
 
@@ -219,6 +237,14 @@ class LoginActivity : ComponentActivity() {
                 // hypothesis either way; if the logs show Doubao rejecting the desktop UA
                 // (e.g. passport refusing it), revisit this line before falling back.
                 userAgentString = DESKTOP_LOGIN_UA
+            }
+
+            // If the render self-test proved hardware compositing broken on this ROM (GPU
+            // compositing blank-screen is common on some vendor ROMs), keep every WebView - a
+            // rebuilt one included - on the software layer for this session. Applied after the
+            // settings block so a fresh instance inherits the verdict immediately.
+            if (softwareRendering) {
+                view.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
             }
 
             // Diagnostics: the provider build and the actual UA the WebView will send. Logged
@@ -457,8 +483,9 @@ class LoginActivity : ComponentActivity() {
      */
     private fun onLoginPollExpired() {
         // Only a quiet wait may flip to "expired": a load-failure state must not be overwritten by
-        // a poller that is still running against a page that never loaded in the first place.
-        if (signedIn || phase != LoginPhase.Waiting) {
+        // a poller that is still running against a page that never loaded in the first place -
+        // and neither may a render self-test that is currently probing another page.
+        if (signedIn || phase != LoginPhase.Waiting || renderTestStage != null) {
             return
         }
         phase = LoginPhase.Expired
@@ -474,6 +501,9 @@ class LoginActivity : ComponentActivity() {
         if (signedIn) {
             return
         }
+        // A transport failure during a render self-test (e.g. baidu.com unreachable) ends the
+        // test: the probe result would say nothing about rendering anyway.
+        cancelRenderSelfTest()
         val base = getString(R.string.login_error_load_failed)
         val detailText = detail?.trim()?.take(ERROR_DETAIL_MAX_LENGTH)
         errorHint = if (detailText.isNullOrBlank()) base else "$base ($detailText)"
@@ -509,20 +539,139 @@ class LoginActivity : ComponentActivity() {
             // No body text at all, or the document never finished - neither recovers on its own.
             if (textLength < BLANK_PAGE_TEXT_MIN_LENGTH || ready != "complete") {
                 onBlankPageDetected(summary)
+            } else if (renderTestStage != null) {
+                // A self-test probe page rendered fine - that is exactly the evidence the
+                // branches in [onRenderTestPageOk] need.
+                Log.i(TAG, "RENDER-TEST: probe page ok ($summary)")
+                onRenderTestPageOk()
             }
         }
     }
 
     /**
-     * Blank-page verdict: reuse the v0.2.1 LoadFailed screen (progress bar -> retry button) with
-     * a dedicated hint naming the empty-content cause plus the probe summary, so a bug report
-     * carries the readyState/length/url evidence inline.
+     * Blank-page verdict. Without a running self-test this now *starts* one instead of giving up:
+     * the login page is blank either because this ROM's WebView cannot render at all (hardware
+     * compositing blank-screen, common on vendor ROMs - fixable by switching to the software
+     * layer) or because the Doubao page itself refuses to render. Probing [RENDER_TEST_URL]
+     * tells the two apart; see [onBlankPageDetected]'s stage branches and [onRenderTestPageOk].
+     *
+     * With a self-test already running, the blank verdict belongs to the probe page: baidu.com
+     * blank under hardware rendering moves the test to its software-rendering round, blank under
+     * software rendering too ends the test with the "WebView itself is broken" verdict.
      */
     private fun onBlankPageDetected(summary: String) {
         if (signedIn || phase != LoginPhase.Waiting) {
             return
         }
         Log.w(TAG, "Blank page detected: $summary")
+        when (renderTestStage) {
+            null -> startRenderSelfTest(summary)
+            RenderTestStage.Baidu -> {
+                Log.w(TAG, "RENDER-TEST: baidu blank under hardware rendering; retrying with " +
+                    "software rendering")
+                val view = webView
+                if (view == null) {
+                    cancelRenderSelfTest()
+                    showBlankPageError(summary)
+                    return
+                }
+                renderTestStage = RenderTestStage.Software
+                softwareRendering = true
+                view.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                view.loadUrl(RENDER_TEST_URL)
+            }
+            RenderTestStage.Software -> {
+                Log.w(TAG, "RENDER-TEST: baidu blank under software rendering too; WebView " +
+                    "itself cannot render")
+                renderTestStage = null
+                errorHint = getString(R.string.login_render_test_webview_broken)
+                phase = LoginPhase.LoadFailed
+                switchBackToLoginUrl()
+            }
+        }
+    }
+
+    /**
+     * Starts the render self-test: the login page just turned out blank, so load
+     * [RENDER_TEST_URL] and let the existing blank-page watchdog (re-armed by every
+     * [android.webkit.WebViewClient.onPageFinished]) deliver the verdict.
+     *
+     * The toolbar stays in [LoginPhase.Waiting] (progress bar) - the test takes about two probe
+     * windows, and the hint bar explains what is happening. Credential collection cannot be
+     * triggered by the probe page: [DoubaoLoginUrl.isSessionCheckCandidate] rejects every
+     * non-doubao URL and the localStorage login flag is origin-scoped, so the poller on
+     * baidu.com can never see `flow_web_has_login`.
+     */
+    private fun startRenderSelfTest(summary: String) {
+        val view = webView
+        if (view == null) {
+            showBlankPageError(summary)
+            return
+        }
+        Log.w(TAG, "RENDER-TEST: login page blank, probing $RENDER_TEST_URL")
+        renderTestStage = RenderTestStage.Baidu
+        errorHint = getString(R.string.login_render_test_running)
+        // Belt and braces: a pending credential check from the blank login page must not fire
+        // while the probe page is up (the flag gate would reject it anyway).
+        mainHandler.removeCallbacks(saveCheck)
+        view.loadUrl(RENDER_TEST_URL)
+    }
+
+    /**
+     * A self-test probe page rendered fine, which pins down the blank-screen cause:
+     *
+     * - [RenderTestStage.Baidu]: the WebView renders correctly, so the Doubao page itself refuses
+     *   to render. Back to the LoadFailed screen (retry + browser escape hatch) and reload the
+     *   login URL to restore the poller semantics.
+     * - [RenderTestStage.Software]: switching to the software layer fixed rendering - keep it
+     *   ([softwareRendering] stays true, so [attachWebView] applies it to any rebuilt WebView)
+     *   and reload the login URL, where the user signs in again as usual.
+     */
+    private fun onRenderTestPageOk() {
+        val stage = renderTestStage ?: return
+        val view = webView ?: run {
+            cancelRenderSelfTest()
+            return
+        }
+        renderTestStage = null
+        when (stage) {
+            RenderTestStage.Baidu -> {
+                Log.w(TAG, "RENDER-TEST: baidu ok; the Doubao page itself failed to render")
+                errorHint = getString(R.string.login_render_test_page_rejected)
+                phase = LoginPhase.LoadFailed
+            }
+            RenderTestStage.Software -> {
+                Log.w(TAG, "RENDER-TEST: hw blank -> sw ok; keeping the software layer")
+                errorHint = getString(R.string.login_render_test_software_fix)
+                // Back to the normal waiting flow: the login page reloads under the software
+                // layer, the poller re-arms and the user signs in as usual.
+                phase = LoginPhase.Waiting
+            }
+        }
+        switchBackToLoginUrl()
+    }
+
+    /** Cancels a running self-test without touching the current hint/phase state. */
+    private fun cancelRenderSelfTest() {
+        if (renderTestStage != null) {
+            Log.w(TAG, "RENDER-TEST: cancelled")
+            renderTestStage = null
+        }
+    }
+
+    /** Reloads the login URL after a self-test verdict, restoring the poller semantics. */
+    private fun switchBackToLoginUrl() {
+        val view = webView ?: return
+        view.loadUrl(DoubaoLoginUrl.LOGIN_URL)
+        updateBackState()
+    }
+
+    /**
+     * The pre-self-test failure screen: the v0.2.1 LoadFailed screen with a dedicated hint naming
+     * the empty-content cause plus the probe summary, so a bug report carries the
+     * readyState/length/url evidence inline.
+     */
+    private fun showBlankPageError(summary: String) {
         val base = getString(R.string.login_error_blank_page)
         val detail = summary.take(ERROR_DETAIL_MAX_LENGTH)
         errorHint = if (detail.isBlank()) base else "$base ($detail)"
@@ -562,6 +711,9 @@ class LoginActivity : ComponentActivity() {
         if (signedIn) {
             return
         }
+        // The user-driven recovery path always starts a clean attempt; a stale self-test stage
+        // must not interpret the fresh page's blank check as a probe verdict.
+        cancelRenderSelfTest()
         phase = LoginPhase.Waiting
         errorHint = ""
         mainHandler.removeCallbacks(saveCheck)
@@ -659,6 +811,14 @@ class LoginActivity : ComponentActivity() {
         /** Delay between page-finished and the blank-page probe. */
         private const val BLANK_CHECK_DELAY_MS = 4_000L
 
+        /**
+         * Probe page for the render self-test: a plain, cache-friendly page the WebView must be
+         * able to render. Blank here means the WebView itself cannot render (layer switch or a
+         * WebView update is needed); rendering fine means the blank login page is the page's own
+         * doing. Never carries credentials - the probe only reads readyState and text length.
+         */
+        private const val RENDER_TEST_URL = "https://www.baidu.com"
+
         /** A page whose rendered body text is shorter than this counts as blank. */
         private const val BLANK_PAGE_TEXT_MIN_LENGTH = 10
 
@@ -701,6 +861,22 @@ private enum class LoginPhase {
 
     /** No WebView provider on this device; nothing can be done inside the app. */
     WebViewUnavailable,
+}
+
+/**
+ * Stage of the automatic render self-test (see [LoginActivity.onBlankPageDetected]).
+ *
+ * The test always runs the two stages in order: first baidu.com under the current (hardware)
+ * rendering, then - only if that came back blank - baidu.com again after switching to the
+ * software layer.
+ */
+private enum class RenderTestStage {
+
+    /** First probe: can the WebView render anything at all (hardware compositing). */
+    Baidu,
+
+    /** Second probe: baidu.com again, after the WebView moved to [View.LAYER_TYPE_SOFTWARE]. */
+    Software,
 }
 
 /**
@@ -865,7 +1041,9 @@ private fun LoginScreen(
                 LoginPhase.WebViewUnavailable -> Spacer(modifier = Modifier.width(48.dp))
             }
         }
-        if (phase != LoginPhase.Waiting) {
+        // Hidden in a plain wait (the scan hint would only add noise), but shown while a render
+        // self-test or its software-rendering recovery needs to explain itself in Waiting phase.
+        if (phase != LoginPhase.Waiting || errorHint.isNotBlank()) {
             Text(
                 text = phaseHint(phase, errorHint),
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -924,7 +1102,13 @@ private fun LoginScreen(
 
 @Composable
 private fun phaseHint(phase: LoginPhase, errorHint: String): String = when (phase) {
-    LoginPhase.Waiting -> stringResource(R.string.login_hint_scan)
+    // Waiting normally shows nothing (the row is hidden); a non-blank hint here carries the
+    // render self-test wording, which takes precedence over the scan hint.
+    LoginPhase.Waiting -> if (errorHint.isNotBlank()) {
+        errorHint
+    } else {
+        stringResource(R.string.login_hint_scan)
+    }
     LoginPhase.Expired -> stringResource(R.string.login_not_detected)
     LoginPhase.LoadFailed -> errorHint
     LoginPhase.WebViewUnavailable -> stringResource(R.string.login_webview_unavailable)
